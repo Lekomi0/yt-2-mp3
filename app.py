@@ -24,8 +24,8 @@ def download():
     logging.info(f"Получен URL: {url}")
 
     configs = [
-        {"api": "convert1s", "bitrate": "320k", "timeout": 30, "attempts": 3, "delay": 5},
-        {"api": "convert1s", "bitrate": "128k", "timeout": 30, "attempts": 5, "delay": 5}
+    {"api": "convert1s", "bitrate": "320k", "timeout": 15, "attempts": 2, "delay": 3},
+    {"api": "convert1s", "bitrate": "128k", "timeout": 15, "attempts": 3, "delay": 3}
     ]
 
     for config in configs:
@@ -57,7 +57,7 @@ def download():
                         time.sleep(config["delay"])
                         continue
                     # Опрашиваем статус
-                    for _ in range(40):
+                    for _ in range(20):
                         time.sleep(2)
                         try:
                             status_resp = requests.get(status_url, timeout=20)
