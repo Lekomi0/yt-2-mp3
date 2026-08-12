@@ -3,6 +3,8 @@ from flask_cors import CORS
 import requests
 import time
 import logging
+import subprocess
+import json
 
 app = Flask(__name__)
 CORS(app)
@@ -57,7 +59,6 @@ def download():
                 if 'downloadUrl' in status_data and status_data['downloadUrl']:
                     mp3_url = status_data['downloadUrl']
                     logging.info(f"Получена ссылка (попытка {attempt+1}): {mp3_url}")
-                    # Возвращаем длинную ссылку без сокращения
                     return jsonify({'link': mp3_url})
                 if status_data.get('status') == 'error' or status_data.get('state') == 'error':
                     break
@@ -68,8 +69,57 @@ def download():
 
         logging.warning(f"Попытка {attempt+1} не удалась, повторяем...")
 
-    # Если все попытки не удались
     return jsonify({'error': 'Conversion timeout after multiple attempts'}), 500
+
+# ===== НОВЫЙ ЭНДПОИНТ ДЛЯ ПЛЕЙЛИСТОВ =====
+@app.route('/playlist', methods=['GET'])
+def playlist():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+
+    try:
+        # Запускаем yt-dlp для получения информации о плейлисте
+        cmd = [
+            "yt-dlp",
+            "--flat-playlist",
+            "--dump-json",
+            "--no-warnings",
+            url
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            logging.error(f"yt-dlp error: {result.stderr}")
+            return jsonify({'error': 'Failed to fetch playlist info'}), 500
+
+        # Парсим вывод (каждая строка — JSON одного трека)
+        tracks = []
+        for line in result.stdout.strip().split('\n'):
+            if line:
+                data = json.loads(line)
+                tracks.append({
+                    'title': data.get('title', 'Unknown'),
+                    'id': data.get('id'),
+                    'duration': data.get('duration', 0),
+                    'url': f"https://www.youtube.com/watch?v={data.get('id')}"
+                })
+
+        if len(tracks) == 0:
+            return jsonify({'error': 'No tracks found'}), 404
+
+        # Название плейлиста (если есть)
+        playlist_title = tracks[0].get('playlist', 'YouTube Playlist')
+
+        return jsonify({
+            'playlist': playlist_title,
+            'tracks': tracks
+        })
+
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Timeout fetching playlist'}), 500
+    except Exception as e:
+        logging.error(f"Playlist error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
