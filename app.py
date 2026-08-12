@@ -482,13 +482,12 @@ def test_download():
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
 
-    # Ссылка, которую будем тестировать
     test_url = url
 
-    # 1. Без заголовков (как сейчас)
+    # 1. Без заголовков
     try:
         resp1 = requests.get(test_url, timeout=10)
-        result1 = {'status': resp1.status_code, 'len': len(resp1.content)}
+        result1 = {'status': resp1.status_code, 'len': len(resp1.content), 'preview': resp1.text[:200]}
     except Exception as e:
         result1 = {'error': str(e)}
 
@@ -499,11 +498,12 @@ def test_download():
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
         'Referer': 'https://media.ytmp3.gg/',
-        'Origin': 'https://media.ytmp3.gg/'
+        'Origin': 'https://media.ytmp3.gg/',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
     }
     try:
         resp2 = requests.get(test_url, headers=headers, timeout=10)
-        result2 = {'status': resp2.status_code, 'len': len(resp2.content)}
+        result2 = {'status': resp2.status_code, 'len': len(resp2.content), 'preview': resp2.text[:200]}
     except Exception as e:
         result2 = {'error': str(e)}
 
