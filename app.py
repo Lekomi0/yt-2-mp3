@@ -12,7 +12,7 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ===== ЭНДПОИНТ /download (с cache_buster и битрейтами) =====
+# ===== ЭНДПОИНТ /download =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
     if request.method == 'OPTIONS':
@@ -24,7 +24,6 @@ def download():
 
     logging.info(f"Получен URL: {url}")
 
-    # Уникальный параметр для "сброса" кеша
     cache_buster = int(time.time() * 1000)
 
     configs = [
@@ -48,7 +47,7 @@ def download():
                         "os": "windows",
                         "output": {"type": "audio", "format": "mp3"},
                         "audio": {"bitrate": config["bitrate"]},
-                        "_": cache_buster + attempt  # уникальный параметр
+                        "_": cache_buster + attempt
                     }
                     resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=config["timeout"])
                     if resp.status_code != 200:
@@ -61,7 +60,6 @@ def download():
                         logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: нет statusUrl")
                         time.sleep(config["delay"])
                         continue
-                    # Опрашиваем статус (20 попыток * 2 сек = 40 сек)
                     for _ in range(20):
                         time.sleep(2)
                         try:
@@ -77,12 +75,10 @@ def download():
                                 break
                         except ConnectionError as e:
                             logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка соединения: {e}")
-                            # Прерываем опрос и переходим к следующей попытке
                             break
                         except Exception as e:
                             logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка при опросе: {e}")
                             continue
-                    # Если не получили ссылку, пробуем следующую попытку
                     logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1} не удалась")
                     time.sleep(config["delay"])
                     continue
@@ -94,7 +90,7 @@ def download():
 
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
-# ===== ЭНДПОИНТ /playlist (с пагинацией и надёжным извлечением list) =====
+# ===== ЭНДПОИНТ /playlist (с логированием и пагинацией) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     url = request.args.get('url')
@@ -103,7 +99,6 @@ def playlist():
 
     logging.info(f"Received URL: {url}")
 
-    # Извлекаем ID плейлиста через regex (надёжнее, чем urlparse)
     match = re.search(r'[?&]list=([^&]+)', url)
     if not match:
         logging.error(f"No list parameter found in URL: {url}")
@@ -115,12 +110,18 @@ def playlist():
     if not API_KEY:
         return jsonify({'error': 'YouTube API key not configured'}), 500
 
+    logging.info("Starting YouTube API request...")
+
     all_tracks = []
     next_page_token = None
-    max_results_per_page = 50
+    max_results_per_page = 30
 
     try:
+        page_count = 0
         while True:
+            page_count += 1
+            logging.info(f"Fetching page {page_count} with token: {next_page_token}")
+
             params = {
                 'part': 'snippet',
                 'maxResults': max_results_per_page,
@@ -130,15 +131,15 @@ def playlist():
             if next_page_token:
                 params['pageToken'] = next_page_token
 
-            resp = requests.get('https://www.googleapis.com/youtube/v3/playlistItems', params=params, timeout=30)
+            resp = requests.get('https://www.googleapis.com/youtube/v3/playlistItems', params=params, timeout=(5, 60))
 
             if resp.status_code != 200:
                 logging.error(f"YouTube API error: {resp.status_code} - {resp.text}")
                 return jsonify({'error': f'YouTube API error: {resp.status_code}'}), 500
 
             data = resp.json()
+            logging.info(f"Page {page_count} returned {len(data.get('items', []))} items")
 
-            # Извлекаем треки из текущей страницы
             for item in data.get('items', []):
                 snippet = item.get('snippet', {})
                 video_id = snippet.get('resourceId', {}).get('videoId')
@@ -149,15 +150,14 @@ def playlist():
                         'url': f"https://www.youtube.com/watch?v={video_id}"
                     })
 
-            # Проверяем, есть ли следующая страница
             next_page_token = data.get('nextPageToken')
             if not next_page_token:
                 break
 
+        logging.info(f"Total tracks collected: {len(all_tracks)}")
         if not all_tracks:
             return jsonify({'error': 'No tracks found'}), 404
 
-        # Название плейлиста (берём из первого элемента)
         playlist_title = data.get('items', [{}])[0].get('snippet', {}).get('playlistTitle', 'YouTube Playlist')
 
         return jsonify({
