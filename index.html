@@ -149,8 +149,8 @@
         }
         .track-item:last-child { border-bottom: none; }
         .track-thumb {
-            width: 40px;
-            height: 30px;
+            width: 80px;
+            height: 60px;
             object-fit: cover;
             flex-shrink: 0;
         }
@@ -160,8 +160,6 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
-
-        /* правая часть строки трека: либо кнопка mp3, либо готовая ссылка */
         .track-action {
             flex-shrink: 0;
             display: flex;
@@ -199,6 +197,27 @@
         }
         .track-copy-btn:active { border-style: inset; }
         .track-copy-btn.copied { background: #90ee90; }
+
+        .track-checkbox {
+            flex-shrink: 0;
+            margin-right: 4px;
+        }
+
+        .batch-buttons {
+            margin-top: 12px;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .batch-buttons button {
+            padding: 4px 12px;
+            border: 1px outset #d4d0c8;
+            background: #d4d0c8;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .batch-buttons button:active { border-style: inset; }
+        .batch-buttons button:disabled { opacity: 0.5; cursor: default; }
 
         .linklist {
             list-style: none;
@@ -256,6 +275,10 @@
             <span class="link">&gt; ожидание ссылки...</span>
         </div>
         <div id="trackList" class="track-list" style="display:none;"></div>
+        <div id="batchButtons" class="batch-buttons" style="display:none;">
+            <button id="zipBtn" onclick="downloadZip()">📦 Скачать ZIP (выбранные)</button>
+            <button id="mergeBtn" onclick="downloadMerge()">🔗 Объединить в один MP3</button>
+        </div>
     </div>
 
     <hr class="thin">
@@ -374,17 +397,23 @@
     // ===== конец авто-декора =====
 
     const API_BASE = 'https://yt-2-mp3.relaxdev.ru';
+    let currentTracks = [];
 
     async function process() {
         const urlInput = document.getElementById('urlInput');
         const resultDiv = document.getElementById('result');
         const trackListDiv = document.getElementById('trackList');
+        const batchDiv = document.getElementById('batchButtons');
         let url = urlInput.value.trim();
+
+        // Сброс
+        trackListDiv.style.display = 'none';
+        trackListDiv.innerHTML = '';
+        batchDiv.style.display = 'none';
+        currentTracks = [];
 
         if (!url) {
             resultDiv.innerHTML = '<span class="link">⚠️ вставь ссылку на YouTube</span>';
-            trackListDiv.style.display = 'none';
-            trackListDiv.innerHTML = '';
             return;
         }
 
@@ -419,7 +448,6 @@
         try {
             const urlParams = new URLSearchParams(new URL(url).search);
             let videoId = urlParams.get('v');
-
             if (!videoId) {
                 resultDiv.innerHTML = '<span class="link">⚠️ не удалось определить трек для скачивания</span>';
                 return;
@@ -450,6 +478,8 @@
             }
 
             if (playlistData.tracks && playlistData.tracks.length > 0) {
+                currentTracks = playlistData.tracks;
+
                 const toggleBtn = document.createElement('button');
                 toggleBtn.textContent = `📋 Показать все треки из плейлиста (${playlistData.tracks.length})`;
                 toggleBtn.style.marginTop = '10px';
@@ -467,17 +497,9 @@
                 };
                 resultDiv.appendChild(toggleBtn);
 
-                if (playlistData.partial) {
-                    const warn = document.createElement('div');
-                    warn.style.marginTop = '6px';
-                    warn.style.color = '#ffcc66';
-                    warn.style.fontSize = '11px';
-                    warn.textContent = '⚠️ ' + (playlistData.warning || 'Список загружен не полностью');
-                    resultDiv.appendChild(warn);
-                }
-
                 renderTrackList(playlistData.tracks);
                 document.getElementById('trackList').style.display = 'none';
+                batchDiv.style.display = 'flex';
             } else {
                 resultDiv.innerHTML += '<br><span class="link">❌ треков не найдено</span>';
             }
@@ -495,6 +517,12 @@
         tracks.forEach((track, index) => {
             const item = document.createElement('div');
             item.className = 'track-item';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'track-checkbox';
+            checkbox.checked = true;
+            checkbox.dataset.index = index;
 
             const img = document.createElement('img');
             img.className = 'track-thumb';
@@ -519,16 +547,12 @@
                     const resp = await fetch(`${API_BASE}/download?url=${encodeURIComponent(track.url)}`);
                     const data = await resp.json();
                     if (data.link) {
-                        // прямо в строке трека заменяем кнопку mp3
-                        // на готовую ссылку + копирование — без отдельного окна внизу
                         actionCell.innerHTML = '';
-
                         const openLink = document.createElement('a');
                         openLink.href = data.link;
                         openLink.target = '_blank';
                         openLink.className = 'track-link-btn';
                         openLink.textContent = '▶ ссылка';
-
                         const copyBtn = document.createElement('button');
                         copyBtn.className = 'track-copy-btn';
                         copyBtn.textContent = '📋';
@@ -542,7 +566,6 @@
                                 }, 2000);
                             }).catch(() => alert('не удалось скопировать'));
                         };
-
                         actionCell.appendChild(openLink);
                         actionCell.appendChild(copyBtn);
                     } else {
@@ -557,6 +580,7 @@
 
             actionCell.appendChild(btn);
 
+            item.appendChild(checkbox);
             item.appendChild(img);
             item.appendChild(titleSpan);
             item.appendChild(actionCell);
@@ -578,6 +602,76 @@
         }).catch(() => {
             alert('не удалось скопировать, скопируйте вручную');
         });
+    }
+
+    function getSelectedTracks() {
+        const checkboxes = document.querySelectorAll('.track-checkbox');
+        const selected = [];
+        checkboxes.forEach((cb) => {
+            if (cb.checked) {
+                const index = parseInt(cb.dataset.index);
+                selected.push(currentTracks[index]);
+            }
+        });
+        return selected;
+    }
+
+    async function downloadZip() {
+        const selected = getSelectedTracks();
+        if (selected.length === 0) {
+            alert('Выберите хотя бы один трек');
+            return;
+        }
+        const btn = document.getElementById('zipBtn');
+        btn.disabled = true;
+        btn.textContent = '⏳';
+        try {
+            const resp = await fetch(`${API_BASE}/zip`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tracks: selected })
+            });
+            if (!resp.ok) throw new Error('Ошибка сервера');
+            const blob = await resp.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'playlist.zip';
+            a.click();
+        } catch (e) {
+            alert('Ошибка: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '📦 Скачать ZIP (выбранные)';
+        }
+    }
+
+    async function downloadMerge() {
+        const selected = getSelectedTracks();
+        if (selected.length === 0) {
+            alert('Выберите хотя бы один трек');
+            return;
+        }
+        const btn = document.getElementById('mergeBtn');
+        btn.disabled = true;
+        btn.textContent = '⏳';
+        try {
+            const resp = await fetch(`${API_BASE}/merge`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tracks: selected })
+            });
+            if (!resp.ok) throw new Error('Ошибка сервера');
+            const blob = await resp.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'merged.mp3';
+            a.click();
+        } catch (e) {
+            alert('Ошибка: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '🔗 Объединить в один MP3';
+        }
     }
 </script>
 </body>
