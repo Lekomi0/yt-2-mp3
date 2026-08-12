@@ -47,7 +47,7 @@ def switch_to_next_key():
     logging.info(f"Переключились на ключ {API_KEYS[current_index][0]}")
     return True
 
-# ===== ЭНДПОИНТ /download (через convert1s.com) =====
+# ===== ЭНДПОИНТ /download (ускоренный + URL-обман) =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
     if request.method == 'OPTIONS':
@@ -62,8 +62,8 @@ def download():
     cache_buster = int(time.time() * 1000)
 
     configs = [
-        {"api": "convert1s", "bitrate": "320k", "timeout": 20, "attempts": 2, "delay": 3},
-        {"api": "convert1s", "bitrate": "128k", "timeout": 20, "attempts": 5, "delay": 3}
+        {"api": "convert1s", "bitrate": "320k", "timeout": 15, "attempts": 2, "delay": 2},
+        {"api": "convert1s", "bitrate": "128k", "timeout": 15, "attempts": 3, "delay": 2}
     ]
 
     for config in configs:
@@ -77,12 +77,13 @@ def download():
                         'referer': 'https://media.ytmp3.gg/',
                         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                     }
+                    # Добавляем уникальный параметр в URL, чтобы API считал это новой задачей
+                    fake_url = url + f"&_={cache_buster + attempt}"
                     payload = {
-                        "url": url,
+                        "url": fake_url,
                         "os": "windows",
                         "output": {"type": "audio", "format": "mp3"},
-                        "audio": {"bitrate": config["bitrate"]},
-                        "_": cache_buster + attempt
+                        "audio": {"bitrate": config["bitrate"]}
                     }
                     resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=config["timeout"])
                     if resp.status_code != 200:
@@ -95,10 +96,12 @@ def download():
                         logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: нет statusUrl")
                         time.sleep(config["delay"])
                         continue
-                    for _ in range(20):
+
+                    # Опрашиваем статус (8 попыток * 2 сек = 16 сек)
+                    for _ in range(8):
                         time.sleep(2)
                         try:
-                            status_resp = requests.get(status_url, timeout=20)
+                            status_resp = requests.get(status_url, timeout=10)
                             if status_resp.status_code != 200:
                                 continue
                             status_data = status_resp.json()
@@ -171,10 +174,8 @@ def playlist():
                     snippet = item.get('snippet', {})
                     video_id = snippet.get('resourceId', {}).get('videoId')
                     if video_id:
-                        # Добавляем миниатюру (default — 120x90, medium — 320x180)
                         thumbnail = snippet.get('thumbnails', {}).get('default', {}).get('url', '')
                         if not thumbnail:
-                            # если default нет, пробуем medium
                             thumbnail = snippet.get('thumbnails', {}).get('medium', {}).get('url', '')
                         tracks.append({
                             'title': snippet.get('title', 'Unknown'),
