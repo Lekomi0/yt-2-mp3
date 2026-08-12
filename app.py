@@ -671,6 +671,42 @@ def proxy_mp3():
 
     return jsonify({'error': 'Proxy failed after retries'}), 500
 
+@app.route('/proxy-mp3-session', methods=['POST'])
+def proxy_mp3_session():
+    data = request.get_json()
+    if not data or 'url' not in data:
+        return jsonify({'error': 'Missing url'}), 400
+
+    url = data['url']
+    cookies = data.get('cookies', {})
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Referer': 'https://media.ytmp3.gg/',
+        'Origin': 'https://media.ytmp3.gg/'
+    }
+
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=headers, cookies=cookies, timeout=(10, 120))
+            if resp.status_code != 200:
+                if attempt == 2:
+                    return jsonify({'error': f'Status {resp.status_code}'}), resp.status_code
+                time.sleep(2)
+                continue
+            return send_file(
+                io.BytesIO(resp.content),
+                mimetype='audio/mpeg',
+                as_attachment=True,
+                download_name='track.mp3'
+            )
+        except Exception as e:
+            if attempt == 2:
+                return jsonify({'error': str(e)}), 500
+            time.sleep(2)
+
+    return jsonify({'error': 'Proxy failed'}), 500
+
 if __name__ == '__main__':
     print("Starting server...")
     app.run(host='0.0.0.0', port=8080)
