@@ -174,7 +174,7 @@ def playlist():
                     snippet = item.get('snippet', {})
                     video_id = snippet.get('resourceId', {}).get('videoId')
                     if video_id:
-                        thumbnail = snippet.get('thumbnails', {}).get('default', {}).get('url', '')
+                        thumbnail = snippet.get('thumbnails', {}).get('medium', {}).get('url', '')
                         if not thumbnail:
                             thumbnail = snippet.get('thumbnails', {}).get('medium', {}).get('url', '')
                         tracks.append({
