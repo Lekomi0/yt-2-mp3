@@ -144,7 +144,8 @@ def download():
     result = process_download(url)
     if 'error' in result:
         return jsonify(result), 500
-    return jsonify(result)
+    # Возвращаем только ссылку, без сессии
+    return jsonify({'link': result['link']})
 
 # ===== ЭНДПОИНТ /playlist =====
 @app.route('/playlist', methods=['GET'])
