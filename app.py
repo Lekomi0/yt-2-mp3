@@ -278,7 +278,6 @@ def zip_tracks():
     if not tracks:
         return jsonify({'error': 'Empty tracks list'}), 400
 
-    # 1. Параллельно получаем ссылки (max_workers=5)
     mp3_urls = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_track = {
@@ -297,7 +296,6 @@ def zip_tracks():
     if not mp3_urls:
         return jsonify({'error': 'No MP3 links obtained'}), 500
 
-    # 2. Последовательное скачивание (max_workers=2, с паузой 0.5 сек)
     downloaded = []
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = []
@@ -314,7 +312,6 @@ def zip_tracks():
     if not downloaded:
         return jsonify({'error': 'No MP3 files downloaded'}), 500
 
-    # 3. Упаковка в ZIP
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             zip_path = os.path.join(tmpdir, 'playlist.zip')
@@ -384,7 +381,6 @@ def merge_tracks():
     if not tracks:
         return jsonify({'error': 'Empty tracks list'}), 400
 
-    # 1. Параллельно получаем ссылки (max_workers=5)
     mp3_urls = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_track = {
@@ -403,7 +399,6 @@ def merge_tracks():
     if not mp3_urls:
         return jsonify({'error': 'No MP3 links obtained'}), 500
 
-    # 2. Последовательное скачивание (max_workers=2, с паузой 0.5 сек)
     downloaded = []
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = []
@@ -420,7 +415,6 @@ def merge_tracks():
     if not downloaded:
         return jsonify({'error': 'No MP3 files downloaded'}), 500
 
-    # 3. Объединение
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             mp3_files = []
@@ -511,14 +505,12 @@ def test_download():
 
     test_url = url
 
-    # 1. Без заголовков
     try:
         resp1 = requests.get(test_url, timeout=10)
         result1 = {'status': resp1.status_code, 'len': len(resp1.content), 'preview': resp1.text[:200]}
     except Exception as e:
         result1 = {'error': str(e)}
 
-    # 2. С браузерными заголовками
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'audio/mpeg,audio/*;q=0.9,*/*;q=0.8',
@@ -538,6 +530,105 @@ def test_download():
         'without_headers': result1,
         'with_headers': result2
     })
+
+# ===== ЭНДПОИНТ /links (только получить ссылки, без скачивания файлов) =====
+# Использует браузер пользователя для самого скачивания — сервер отдаёт только
+# прямые mp3-ссылки, полученные через process_download().
+@app.route('/links', methods=['POST'])
+def get_links():
+    data = request.get_json()
+    if not data or 'tracks' not in data:
+        return jsonify({'error': 'Missing tracks list'}), 400
+
+    tracks = data['tracks']
+    if not tracks:
+        return jsonify({'error': 'Empty tracks list'}), 400
+
+    results = [None] * len(tracks)
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_idx = {
+            executor.submit(process_download, track['url']): idx
+            for idx, track in enumerate(tracks)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            result = future.result()
+            title = tracks[idx].get('title', f'track_{idx+1}')
+            if 'link' in result:
+                results[idx] = {'idx': idx, 'title': title, 'url': result['link'], 'ok': True}
+                logging.info(f"Ссылка получена для {title}")
+            else:
+                results[idx] = {'idx': idx, 'title': title, 'ok': False, 'error': result.get('error')}
+                logging.warning(f"Не удалось получить ссылку для {title}: {result.get('error')}")
+
+    ok_count = sum(1 for r in results if r['ok'])
+    if ok_count == 0:
+        return jsonify({'error': 'No MP3 links obtained'}), 500
+
+    return jsonify({'tracks': results, 'total': len(tracks), 'ok': ok_count})
+
+# ===== ЭНДПОИНТ /zip-upload (браузер скачал mp3 сам и грузит нам байты для упаковки) =====
+@app.route('/zip-upload', methods=['POST'])
+def zip_upload():
+    # Ожидается multipart/form-data:
+    #   files   — несколько файлов (в нужном порядке добавления)
+    #   titles  — JSON-массив названий в том же порядке (опционально)
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'error': 'No files uploaded'}), 400
+
+    titles = request.form.getlist('titles')
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = os.path.join(tmpdir, 'playlist.zip')
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for idx, f in enumerate(files):
+                    title = titles[idx] if idx < len(titles) else f"track_{idx+1}"
+                    filename = f"{idx+1:02d} - {title}.mp3"
+                    safe_filename = re.sub(r'[\\/*?:"<>|]', '', filename)
+                    filepath = os.path.join(tmpdir, safe_filename)
+                    f.save(filepath)
+                    zipf.write(filepath, safe_filename)
+            return send_file(zip_path, as_attachment=True, download_name='playlist.zip')
+    except Exception as e:
+        logging.error(f"ZIP upload error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# ===== ЭНДПОИНТ /merge-upload (браузер скачал mp3 сам и грузит нам байты для склейки) =====
+@app.route('/merge-upload', methods=['POST'])
+def merge_upload():
+    # Ожидается multipart/form-data:
+    #   files — несколько mp3-файлов В ПРАВИЛЬНОМ ПОРЯДКЕ склейки
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'error': 'No files uploaded'}), 400
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mp3_files = []
+            for idx, f in enumerate(files):
+                filename = f"{idx:04d}.mp3"
+                filepath = os.path.join(tmpdir, filename)
+                f.save(filepath)
+                mp3_files.append(filepath)
+
+            list_path = os.path.join(tmpdir, 'list.txt')
+            with open(list_path, 'w') as fh:
+                for mp3 in mp3_files:
+                    fh.write(f"file '{os.path.basename(mp3)}'\n")
+
+            output_path = os.path.join(tmpdir, 'merged.mp3')
+            cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy', output_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=tmpdir, timeout=300)
+            if result.returncode != 0:
+                logging.error(f"FFmpeg error: {result.stderr}")
+                return jsonify({'error': 'FFmpeg merge failed'}), 500
+
+            return send_file(output_path, as_attachment=True, download_name='merged.mp3')
+    except Exception as e:
+        logging.error(f"Merge upload error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     print("Starting server...")
