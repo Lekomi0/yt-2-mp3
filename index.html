@@ -408,6 +408,7 @@
         const batchDiv = document.getElementById('batchButtons');
         let url = urlInput.value.trim();
 
+        // Сброс
         trackListDiv.style.display = 'none';
         trackListDiv.innerHTML = '';
         batchDiv.style.display = 'none';
@@ -518,7 +519,7 @@
         tracks.forEach((track, index) => {
             const item = document.createElement('div');
             item.className = 'track-item';
-            item.dataset.url = track.url;
+            item.dataset.url = track.url;  // сохраняем URL для сбора ссылок
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
@@ -606,7 +607,7 @@
         });
     }
 
-    // ===== НОВЫЕ ФУНКЦИИ ДЛЯ ZIP / MERGE (с использованием прокси) =====
+    // ===== НОВЫЕ ФУНКЦИИ ДЛЯ ZIP / MERGE (клиентское скачивание) =====
     async function getDirectLinks(tracks) {
         const resp = await fetch(`${API_BASE}/links`, {
             method: 'POST',
@@ -615,37 +616,15 @@
         });
         if (!resp.ok) throw new Error('Не удалось получить ссылки');
         const data = await resp.json();
+        // data.tracks: [{ idx, title, url, ok, error? }, ...]
         return data.tracks.filter(t => t.ok);
     }
 
-    async function fetchMp3Blob(url, retries = 3, delay = 2000, timeout = 30000) {
-    // Получаем cookies из document.cookie (или из сессии, если ты их хранишь)
-    const cookies = document.cookie.split('; ').reduce((acc, c) => {
-        const [key, val] = c.split('=');
-        acc[key] = val;
-        return acc;
-    }, {});
-
-    for (let i = 0; i < retries; i++) {
-        try {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeout);
-            const resp = await fetch(`${API_BASE}/proxy-mp3-session`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, cookies }),
-                signal: controller.signal
-            });
-            clearTimeout(timer);
-            if (!resp.ok) throw new Error(`Статус ${resp.status}`);
-            return await resp.blob();
-        } catch (e) {
-            if (i === retries - 1) throw e;
-            console.log(`Попытка ${i+1} не удалась, повтор через ${delay}мс...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-        }
+    async function fetchMp3Blob(url) {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Статус ${resp.status} при скачивании`);
+        return await resp.blob();
     }
-}
 
     // Скачать все треки как ZIP (сборка на клиенте)
     async function downloadAsZip(tracks, onProgress) {
@@ -705,6 +684,7 @@
         try {
             await downloadAsZip(currentTracks, (msg) => {
                 console.log(msg);
+                // Можно обновлять статус на кнопке
                 btn.textContent = msg;
             });
         } catch (e) {
