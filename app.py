@@ -3,13 +3,13 @@ from flask_cors import CORS
 import requests
 import time
 import logging
-import subprocess
-import json
+import os 
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
+# ===== СУЩЕСТВУЮЩИЙ ЭНДПОИНТ /download =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
     if request.method == 'OPTIONS':
@@ -71,52 +71,56 @@ def download():
 
     return jsonify({'error': 'Conversion timeout after multiple attempts'}), 500
 
-# ===== НОВЫЙ ЭНДПОИНТ ДЛЯ ПЛЕЙЛИСТОВ =====
+# ===== НОВЫЙ ЭНДПОИНТ /playlist =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
 
-    try:
-        # Запускаем yt-dlp для получения информации о плейлисте
-        cmd = [
-            "yt-dlp",
-            "--flat-playlist",
-            "--dump-json",
-            "--no-warnings",
-            url
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0:
-            logging.error(f"yt-dlp error: {result.stderr}")
-            return jsonify({'error': 'Failed to fetch playlist info'}), 500
+    # Извлекаем ID плейлиста из URL
+    import re
+    match = re.search(r'list=([a-zA-Z0-9_-]+)', url)
+    if not match:
+        return jsonify({'error': 'Invalid playlist URL'}), 400
+    playlist_id = match.group(1)
 
-        # Парсим вывод (каждая строка — JSON одного трека)
+    # Берём ключ из переменной окружения
+    API_KEY = os.getenv('YOUTUBE_API_KEY')
+    if not API_KEY:
+        return jsonify({'error': 'YouTube API key not configured'}), 500
+
+    try:
+        # Запрашиваем список треков через YouTube API
+        api_url = f"https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&maxResults=50&playlistId={playlist_id}&key={API_KEY}"
+        resp = requests.get(api_url, timeout=30)
+        if resp.status_code != 200:
+            logging.error(f"YouTube API error: {resp.status_code} - {resp.text}")
+            return jsonify({'error': f'YouTube API error: {resp.status_code}'}), 500
+
+        data = resp.json()
         tracks = []
-        for line in result.stdout.strip().split('\n'):
-            if line:
-                data = json.loads(line)
+        for item in data.get('items', []):
+            snippet = item.get('snippet', {})
+            video_id = snippet.get('resourceId', {}).get('videoId')
+            if video_id:
                 tracks.append({
-                    'title': data.get('title', 'Unknown'),
-                    'id': data.get('id'),
-                    'duration': data.get('duration', 0),
-                    'url': f"https://www.youtube.com/watch?v={data.get('id')}"
+                    'title': snippet.get('title', 'Unknown'),
+                    'id': video_id,
+                    'url': f"https://www.youtube.com/watch?v={video_id}"
                 })
 
-        if len(tracks) == 0:
+        if not tracks:
             return jsonify({'error': 'No tracks found'}), 404
 
-        # Название плейлиста (если есть)
-        playlist_title = tracks[0].get('playlist', 'YouTube Playlist')
+        # Название плейлиста
+        playlist_title = data.get('items', [{}])[0].get('snippet', {}).get('playlistTitle', 'YouTube Playlist')
 
         return jsonify({
             'playlist': playlist_title,
             'tracks': tracks
         })
 
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Timeout fetching playlist'}), 500
     except Exception as e:
         logging.error(f"Playlist error: {str(e)}")
         return jsonify({'error': str(e)}), 500
