@@ -6,15 +6,33 @@ import time
 import logging
 import os
 import re
-import subprocess
-import json
 from requests.exceptions import ConnectionError
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ===== ЭНДПОИНТ /download (через convert1s.com) =====
+# ===== НАСТРОЙКА РОТАЦИИ КЛЮЧЕЙ =====
+API_KEYS = os.getenv('YOUTUBE_API_KEYS', '').split(',')
+API_KEYS = [k.strip() for k in API_KEYS if k.strip()]
+current_key_index = 0
+
+def get_current_key():
+    """Возвращает текущий активный ключ."""
+    if not API_KEYS:
+        raise Exception('No API keys configured')
+    return API_KEYS[current_key_index]
+
+def switch_to_next_key():
+    """Переключает на следующий ключ, если есть. Возвращает True если переключился, иначе False."""
+    global current_key_index
+    if current_key_index < len(API_KEYS) - 1:
+        current_key_index += 1
+        logging.info(f"Переключились на ключ #{current_key_index+1}")
+        return True
+    return False
+
+# ===== ЭНДПОИНТ /download (без изменений, через convert1s.com) =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
     if request.method == 'OPTIONS':
@@ -93,65 +111,85 @@ def download():
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
 
-# ===== ЭНДПОИНТ /playlist (через yt-dlp-ytse с обходом блокировок) =====
+# ===== ЭНДПОИНТ /playlist (через YouTube API с ротацией ключей) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
 
-    logging.info(f"Received playlist URL: {url}")
+    logging.info(f"Received URL: {url}")
 
-    try:
-        cmd = [
-            "yt-dlp",
-            "--flat-playlist",
-            "--dump-json",
-            "--no-warnings",
-            "--no-check-certificate",
-            "-4",
-            "--extractor-args", "youtube:player-client=web,default",
-            "--playlist-end", "50",
-            url
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    match = re.search(r'[?&]list=([^&]+)', url)
+    if not match:
+        logging.error(f"No list parameter found in URL: {url}")
+        return jsonify({'error': 'Invalid playlist URL: no list parameter found'}), 400
+    playlist_id = match.group(1)
+    logging.info(f"Extracted playlist ID: {playlist_id}")
 
-        if result.returncode != 0:
-            logging.error(f"yt-dlp error: {result.stderr}")
-            return jsonify({'error': 'Failed to fetch playlist'}), 500
+    max_attempts = len(API_KEYS) * 2  # на случай, если ключи валидны, но квота исчерпана
+    attempt = 0
 
-        tracks = []
-        playlist_title = "YouTube Playlist"
-        for line in result.stdout.strip().split('\n'):
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                if 'playlist_title' in data:
-                    playlist_title = data['playlist_title']
-                tracks.append({
-                    'title': data.get('title', 'Unknown'),
-                    'id': data.get('id'),
-                    'url': f"https://www.youtube.com/watch?v={data.get('id')}"
+    while attempt < max_attempts:
+        current_key = get_current_key()
+        logging.info(f"Using API key: {current_key[:10]}...")
+
+        params = {
+            'part': 'snippet',
+            'maxResults': 50,
+            'playlistId': playlist_id,
+            'key': current_key
+        }
+
+        try:
+            resp = requests.get('https://www.googleapis.com/youtube/v3/playlistItems', params=params, timeout=30)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                tracks = []
+                playlist_title = 'YouTube Playlist'
+
+                for item in data.get('items', []):
+                    snippet = item.get('snippet', {})
+                    video_id = snippet.get('resourceId', {}).get('videoId')
+                    if video_id:
+                        tracks.append({
+                            'title': snippet.get('title', 'Unknown'),
+                            'id': video_id,
+                            'url': f"https://www.youtube.com/watch?v={video_id}"
+                        })
+                        if snippet.get('playlistTitle') and playlist_title == 'YouTube Playlist':
+                            playlist_title = snippet.get('playlistTitle')
+
+                if not tracks:
+                    return jsonify({'error': 'No tracks found'}), 404
+
+                return jsonify({
+                    'playlist': playlist_title,
+                    'tracks': tracks,
+                    'total': len(tracks)
                 })
-            except json.JSONDecodeError:
+
+            elif resp.status_code == 403 and 'quotaExceeded' in resp.text:
+                # Квота исчерпана — переключаемся на следующий ключ
+                logging.warning(f"Key {current_key[:10]}... quota exceeded, switching...")
+                if not switch_to_next_key():
+                    logging.error("All API keys exhausted")
+                    return jsonify({'error': 'All API keys quota exceeded'}), 500
+                attempt += 1
+                time.sleep(1)
                 continue
 
-        if not tracks:
-            return jsonify({'error': 'No tracks found'}), 404
+            else:
+                # Другая ошибка — возвращаем её
+                logging.error(f"YouTube API error: {resp.status_code} - {resp.text}")
+                return jsonify({'error': f'YouTube API error: {resp.status_code}'}), 500
 
-        return jsonify({
-            'playlist': playlist_title,
-            'tracks': tracks,
-            'total': len(tracks)
-        })
+        except Exception as e:
+            logging.error(f"Playlist error: {str(e)}")
+            return jsonify({'error': str(e)}), 500
 
-    except subprocess.TimeoutExpired:
-        logging.error("yt-dlp timeout")
-        return jsonify({'error': 'Timeout fetching playlist'}), 500
-    except Exception as e:
-        logging.error(f"Playlist error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+    return jsonify({'error': 'All API keys quota exceeded'}), 500
 
 
 if __name__ == '__main__':
