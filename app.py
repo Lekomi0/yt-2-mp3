@@ -12,27 +12,44 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ===== НАСТРОЙКА РОТАЦИИ КЛЮЧЕЙ =====
-API_KEYS = os.getenv('YOUTUBE_API_KEYS', '').split(',')
-API_KEYS = [k.strip() for k in API_KEYS if k.strip()]
-current_key_index = 0
+# ===== НАСТРОЙКА РОТАЦИИ КЛЮЧЕЙ (с пользовательскими номерами) =====
+raw_keys = os.getenv('YOUTUBE_API_KEYS', '').split(',')
+API_KEYS = []  # список кортежей (номер, ключ)
+for item in raw_keys:
+    item = item.strip()
+    if ':' in item:
+        num, key = item.split(':', 1)
+        API_KEYS.append((int(num.strip()), key.strip()))
+    else:
+        # если формат старый (только ключ), присваиваем порядковый номер
+        API_KEYS.append((len(API_KEYS)+1, item))
 
-def get_current_key():
-    """Возвращает текущий активный ключ."""
-    if not API_KEYS:
-        raise Exception('No API keys configured')
-    return API_KEYS[current_key_index]
+if not API_KEYS:
+    logging.error("No API keys configured!")
+    raise SystemExit("No API keys configured")
+
+logging.info(f"Загружено {len(API_KEYS)} API ключей:")
+for num, key in API_KEYS:
+    logging.info(f"  Ключ {num}: {key[:10]}...")
+
+current_index = 0  # индекс в списке API_KEYS
+switch_count = 0   # сколько раз прошли полный круг
+
+def get_current_key_info():
+    """Возвращает кортеж (номер, ключ) для текущего индекса."""
+    return API_KEYS[current_index]
 
 def switch_to_next_key():
-    """Переключает на следующий ключ, если есть. Возвращает True если переключился, иначе False."""
-    global current_key_index
-    if current_key_index < len(API_KEYS) - 1:
-        current_key_index += 1
-        logging.info(f"Переключились на ключ #{current_key_index+1}")
-        return True
-    return False
+    global current_index, switch_count
+    if current_index < len(API_KEYS) - 1:
+        current_index += 1
+    else:
+        current_index = 0
+        switch_count += 1  # завершили полный круг
+    logging.info(f"Переключились на ключ {API_KEYS[current_index][0]}")
+    return True
 
-# ===== ЭНДПОИНТ /download (без изменений, через convert1s.com) =====
+# ===== ЭНДПОИНТ /download (через convert1s.com) =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
     if request.method == 'OPTIONS':
@@ -111,9 +128,10 @@ def download():
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
 
-# ===== ЭНДПОИНТ /playlist (через YouTube API с ротацией ключей) =====
+# ===== ЭНДПОИНТ /playlist (с ротацией ключей и детальным логированием) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
+    global switch_count
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
@@ -127,12 +145,12 @@ def playlist():
     playlist_id = match.group(1)
     logging.info(f"Extracted playlist ID: {playlist_id}")
 
-    max_attempts = len(API_KEYS) * 2  # на случай, если ключи валидны, но квота исчерпана
+    max_attempts = len(API_KEYS) * 3  # запасной лимит
     attempt = 0
 
     while attempt < max_attempts:
-        current_key = get_current_key()
-        logging.info(f"Using API key: {current_key[:10]}...")
+        num, current_key = get_current_key_info()
+        logging.info(f"🔑 Ключ {num} - пытаемся использовать...")
 
         params = {
             'part': 'snippet',
@@ -145,6 +163,8 @@ def playlist():
             resp = requests.get('https://www.googleapis.com/youtube/v3/playlistItems', params=params, timeout=30)
 
             if resp.status_code == 200:
+                logging.info(f"✅ Ключ {num} - работает (сейчас используется)")
+                switch_count = 0  # сброс счётчика кругов при успехе
                 data = resp.json()
                 tracks = []
                 playlist_title = 'YouTube Playlist'
@@ -171,17 +191,16 @@ def playlist():
                 })
 
             elif resp.status_code == 403 and 'quotaExceeded' in resp.text:
-                # Квота исчерпана — переключаемся на следующий ключ
-                logging.warning(f"Key {current_key[:10]}... quota exceeded, switching...")
-                if not switch_to_next_key():
-                    logging.error("All API keys exhausted")
-                    return jsonify({'error': 'All API keys quota exceeded'}), 500
+                logging.warning(f"❌ Ключ {num} - не работает (квота исчерпана)")
+                switch_to_next_key()
                 attempt += 1
-                time.sleep(1)
+                # Проверяем, не прошли ли мы полный круг без успеха
+                if switch_count > 0 and switch_count % len(API_KEYS) == 0:
+                    logging.warning("Все ключи перебраны без успеха. Пауза 60 секунд...")
+                    time.sleep(60)
                 continue
 
             else:
-                # Другая ошибка — возвращаем её
                 logging.error(f"YouTube API error: {resp.status_code} - {resp.text}")
                 return jsonify({'error': f'YouTube API error: {resp.status_code}'}), 500
 
