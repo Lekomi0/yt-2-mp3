@@ -23,9 +23,12 @@ def download():
 
     logging.info(f"Получен URL: {url}")
 
+    # Уникальный параметр для "сброса" кеша
+    cache_buster = int(time.time() * 1000)
+
     configs = [
-    {"api": "convert1s", "bitrate": "320k", "timeout": 15, "attempts": 2, "delay": 3},
-    {"api": "convert1s", "bitrate": "128k", "timeout": 15, "attempts": 3, "delay": 3}
+        {"api": "convert1s", "bitrate": "320k", "timeout": 20, "attempts": 2, "delay": 3},
+        {"api": "convert1s", "bitrate": "128k", "timeout": 20, "attempts": 5, "delay": 3}
     ]
 
     for config in configs:
@@ -43,7 +46,8 @@ def download():
                         "url": url,
                         "os": "windows",
                         "output": {"type": "audio", "format": "mp3"},
-                        "audio": {"bitrate": config["bitrate"]}
+                        "audio": {"bitrate": config["bitrate"]},
+                        "_": cache_buster + attempt  # уникальный параметр
                     }
                     resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=config["timeout"])
                     if resp.status_code != 200:
@@ -56,7 +60,7 @@ def download():
                         logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: нет statusUrl")
                         time.sleep(config["delay"])
                         continue
-                    # Опрашиваем статус
+                    # Опрашиваем статус (20 попыток * 2 сек = 40 сек)
                     for _ in range(20):
                         time.sleep(2)
                         try:
@@ -72,6 +76,7 @@ def download():
                                 break
                         except ConnectionError as e:
                             logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка соединения: {e}")
+                            # Прерываем опрос и переходим к следующей попытке
                             break
                         except Exception as e:
                             logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка при опросе: {e}")
@@ -87,7 +92,7 @@ def download():
 
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
-# ===== НОВЫЙ ЭНДПОИНТ /playlist (БЕЗ ИЗМЕНЕНИЙ) =====
+# ===== ЭНДПОИНТ /playlist (БЕЗ ИЗМЕНЕНИЙ) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     url = request.args.get('url')
