@@ -135,13 +135,13 @@
             background: #000;
             padding: 8px 10px;
             border: 1px inset #808080;
-            max-height: 300px;
+            max-height: 340px;
             overflow-y: auto;
         }
         .track-item {
             display: flex;
             align-items: center;
-            padding: 4px 0;
+            padding: 5px 0;
             border-bottom: 1px solid #333;
             color: #0f0;
             font-size: 12px;
@@ -160,6 +160,14 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
+
+        /* правая часть строки трека: либо кнопка mp3, либо готовая ссылка */
+        .track-action {
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
         .track-btn {
             background: #d4d0c8;
             border: 1px outset #d4d0c8;
@@ -169,46 +177,28 @@
             flex-shrink: 0;
         }
         .track-btn:active { border-style: inset; }
-        .track-btn.downloaded { background: #90ee90; }
+        .track-btn:disabled { cursor: default; opacity: 0.7; }
 
-        .saved-links {
-            margin-top: 10px;
-            background: #000;
-            padding: 8px 10px;
-            border: 1px inset #808080;
-            max-height: 200px;
-            overflow-y: auto;
-            display: none;
-        }
-        .saved-links-title {
-            color: #0f0;
-            font-weight: bold;
-            margin-bottom: 6px;
-        }
-        .saved-link-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 4px 0;
-            border-bottom: 1px solid #333;
-            color: #0f0;
-            font-size: 12px;
-        }
-        .saved-link-item .link-text {
-            flex: 1;
-            margin-right: 8px;
-            word-break: break-all;
-        }
-        .saved-link-item .link-text a { color: #0ff; }
-        .saved-link-item .link-copy-btn {
-            background: #d4d0c8;
-            border: 1px outset #d4d0c8;
-            padding: 2px 10px;
+        .track-link-btn {
+            background: #1a4d1a;
+            border: 1px outset #2a7a2a;
+            color: #9dff9d;
+            padding: 2px 8px;
             font-size: 11px;
             cursor: pointer;
-            flex-shrink: 0;
+            text-decoration: none;
+            white-space: nowrap;
         }
-        .saved-link-item .link-copy-btn:active { border-style: inset; }
+        .track-link-btn:active { border-style: inset; }
+        .track-copy-btn {
+            background: #d4d0c8;
+            border: 1px outset #d4d0c8;
+            padding: 2px 8px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .track-copy-btn:active { border-style: inset; }
+        .track-copy-btn.copied { background: #90ee90; }
 
         .linklist {
             list-style: none;
@@ -266,10 +256,6 @@
             <span class="link">&gt; ожидание ссылки...</span>
         </div>
         <div id="trackList" class="track-list" style="display:none;"></div>
-        <div id="savedLinks" class="saved-links">
-            <div class="saved-links-title">📌 Сохранённые ссылки:</div>
-            <div id="savedLinksList"></div>
-        </div>
     </div>
 
     <hr class="thin">
@@ -393,12 +379,7 @@
         const urlInput = document.getElementById('urlInput');
         const resultDiv = document.getElementById('result');
         const trackListDiv = document.getElementById('trackList');
-        const savedLinksDiv = document.getElementById('savedLinks');
-        const savedLinksList = document.getElementById('savedLinksList');
         let url = urlInput.value.trim();
-
-        savedLinksList.innerHTML = '';
-        savedLinksDiv.style.display = 'none';
 
         if (!url) {
             resultDiv.innerHTML = '<span class="link">⚠️ вставь ссылку на YouTube</span>';
@@ -438,7 +419,7 @@
         try {
             const urlParams = new URLSearchParams(new URL(url).search);
             let videoId = urlParams.get('v');
-            
+
             if (!videoId) {
                 resultDiv.innerHTML = '<span class="link">⚠️ не удалось определить трек для скачивания</span>';
                 return;
@@ -470,7 +451,7 @@
 
             if (playlistData.tracks && playlistData.tracks.length > 0) {
                 const toggleBtn = document.createElement('button');
-                toggleBtn.textContent = '📋 Показать все треки из плейлиста';
+                toggleBtn.textContent = `📋 Показать все треки из плейлиста (${playlistData.tracks.length})`;
                 toggleBtn.style.marginTop = '10px';
                 toggleBtn.style.padding = '4px 12px';
                 toggleBtn.style.cursor = 'pointer';
@@ -481,14 +462,22 @@
                         toggleBtn.textContent = '🔼 Скрыть треки';
                     } else {
                         list.style.display = 'none';
-                        toggleBtn.textContent = '📋 Показать все треки из плейлиста';
+                        toggleBtn.textContent = `📋 Показать все треки из плейлиста (${playlistData.tracks.length})`;
                     }
                 };
                 resultDiv.appendChild(toggleBtn);
 
+                if (playlistData.partial) {
+                    const warn = document.createElement('div');
+                    warn.style.marginTop = '6px';
+                    warn.style.color = '#ffcc66';
+                    warn.style.fontSize = '11px';
+                    warn.textContent = '⚠️ ' + (playlistData.warning || 'Список загружен не полностью');
+                    resultDiv.appendChild(warn);
+                }
+
                 renderTrackList(playlistData.tracks);
                 document.getElementById('trackList').style.display = 'none';
-                savedLinksDiv.style.display = 'block';
             } else {
                 resultDiv.innerHTML += '<br><span class="link">❌ треков не найдено</span>';
             }
@@ -507,18 +496,18 @@
             const item = document.createElement('div');
             item.className = 'track-item';
 
-            // Картинка
             const img = document.createElement('img');
             img.className = 'track-thumb';
             img.src = track.thumbnail || '';
             img.alt = '';
-            if (!track.thumbnail) {
-                img.style.display = 'none';
-            }
+            if (!track.thumbnail) img.style.display = 'none';
 
             const titleSpan = document.createElement('span');
             titleSpan.className = 'track-title';
-            titleSpan.textContent = `${index+1}. ${track.title}`;
+            titleSpan.textContent = `${index + 1}. ${track.title}`;
+
+            const actionCell = document.createElement('span');
+            actionCell.className = 'track-action';
 
             const btn = document.createElement('button');
             btn.className = 'track-btn';
@@ -530,9 +519,32 @@
                     const resp = await fetch(`${API_BASE}/download?url=${encodeURIComponent(track.url)}`);
                     const data = await resp.json();
                     if (data.link) {
-                        btn.textContent = '✅';
-                        btn.classList.add('downloaded');
-                        addSavedLink(track.title, data.link);
+                        // прямо в строке трека заменяем кнопку mp3
+                        // на готовую ссылку + копирование — без отдельного окна внизу
+                        actionCell.innerHTML = '';
+
+                        const openLink = document.createElement('a');
+                        openLink.href = data.link;
+                        openLink.target = '_blank';
+                        openLink.className = 'track-link-btn';
+                        openLink.textContent = '▶ ссылка';
+
+                        const copyBtn = document.createElement('button');
+                        copyBtn.className = 'track-copy-btn';
+                        copyBtn.textContent = '📋';
+                        copyBtn.onclick = () => {
+                            navigator.clipboard.writeText(data.link).then(() => {
+                                copyBtn.textContent = '✅';
+                                copyBtn.classList.add('copied');
+                                setTimeout(() => {
+                                    copyBtn.textContent = '📋';
+                                    copyBtn.classList.remove('copied');
+                                }, 2000);
+                            }).catch(() => alert('не удалось скопировать'));
+                        };
+
+                        actionCell.appendChild(openLink);
+                        actionCell.appendChild(copyBtn);
                     } else {
                         btn.textContent = '❌';
                         btn.disabled = false;
@@ -543,36 +555,13 @@
                 }
             };
 
+            actionCell.appendChild(btn);
+
             item.appendChild(img);
             item.appendChild(titleSpan);
-            item.appendChild(btn);
+            item.appendChild(actionCell);
             trackListDiv.appendChild(item);
         });
-    }
-
-    function addSavedLink(title, link) {
-        const list = document.getElementById('savedLinksList');
-        const item = document.createElement('div');
-        item.className = 'saved-link-item';
-
-        const textSpan = document.createElement('span');
-        textSpan.className = 'link-text';
-        textSpan.innerHTML = `${title} → <a href="${link}" target="_blank">${link}</a>`;
-
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'link-copy-btn';
-        copyBtn.textContent = 'копировать';
-        copyBtn.onclick = () => {
-            navigator.clipboard.writeText(link).then(() => {
-                copyBtn.textContent = '✅';
-                setTimeout(() => { copyBtn.textContent = 'копировать'; }, 2000);
-            }).catch(() => alert('не удалось скопировать'));
-        };
-
-        item.appendChild(textSpan);
-        item.appendChild(copyBtn);
-        list.appendChild(item);
-        document.getElementById('savedLinks').style.display = 'block';
     }
 
     function copyLink(link) {
