@@ -619,23 +619,33 @@
     }
 
     async function fetchMp3Blob(url, retries = 3, delay = 2000, timeout = 30000) {
-        // Используем прокси-эндпоинт, чтобы обойти CORS и IP-бан
-        const proxyUrl = `${API_BASE}/proxy-mp3?url=${encodeURIComponent(url)}`;
-        for (let i = 0; i < retries; i++) {
-            try {
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), timeout);
-                const resp = await fetch(proxyUrl, { signal: controller.signal });
-                clearTimeout(timer);
-                if (!resp.ok) throw new Error(`Статус ${resp.status}`);
-                return await resp.blob();
-            } catch (e) {
-                if (i === retries - 1) throw e;
-                console.log(`Попытка ${i+1} не удалась, повтор через ${delay}мс...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-            }
+    // Получаем cookies из document.cookie (или из сессии, если ты их хранишь)
+    const cookies = document.cookie.split('; ').reduce((acc, c) => {
+        const [key, val] = c.split('=');
+        acc[key] = val;
+        return acc;
+    }, {});
+
+    for (let i = 0; i < retries; i++) {
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeout);
+            const resp = await fetch(`${API_BASE}/proxy-mp3-session`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, cookies }),
+                signal: controller.signal
+            });
+            clearTimeout(timer);
+            if (!resp.ok) throw new Error(`Статус ${resp.status}`);
+            return await resp.blob();
+        } catch (e) {
+            if (i === retries - 1) throw e;
+            console.log(`Попытка ${i+1} не удалась, повтор через ${delay}мс...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
+}
 
     // Скачать все треки как ZIP (сборка на клиенте)
     async function downloadAsZip(tracks, onProgress) {
