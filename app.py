@@ -168,7 +168,6 @@ def playlist():
 
             logging.info(f"Page {page_count} returned {len(page_data.get('items', []))} items")
 
-            # Запоминаем название плейлиста из первого элемента
             if page_count == 1 and page_data.get('items'):
                 first_item = page_data['items'][0]
                 playlist_title = first_item.get('snippet', {}).get('playlistTitle', 'YouTube Playlist')
