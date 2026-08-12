@@ -6,13 +6,15 @@ import time
 import logging
 import os
 import re
+import subprocess
+import json
 from requests.exceptions import ConnectionError
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ===== ЭНДПОИНТ /download (без изменений) =====
+# ===== ЭНДПОИНТ /download (через convert1s.com) =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
     if request.method == 'OPTIONS':
@@ -91,54 +93,46 @@ def download():
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
 
-# ===== ПРОСТОЙ ЭНДПОИНТ /playlist (БЕЗ ПАГИНАЦИИ) =====
+# ===== ЭНДПОИНТ /playlist (через yt-dlp, без YouTube API) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
 
-    logging.info(f"Received URL: {url}")
-
-    match = re.search(r'[?&]list=([^&]+)', url)
-    if not match:
-        logging.error(f"No list parameter found in URL: {url}")
-        return jsonify({'error': 'Invalid playlist URL: no list parameter found'}), 400
-    playlist_id = match.group(1)
-    logging.info(f"Extracted playlist ID: {playlist_id}")
-
-    API_KEY = os.getenv('YOUTUBE_API_KEY')
-    if not API_KEY:
-        return jsonify({'error': 'YouTube API key not configured'}), 500
+    logging.info(f"Received playlist URL: {url}")
 
     try:
-        params = {
-            'part': 'snippet',
-            'maxResults': 50,
-            'playlistId': playlist_id,
-            'key': API_KEY
-        }
-        resp = requests.get('https://www.googleapis.com/youtube/v3/playlistItems', params=params, timeout=30)
+        cmd = [
+            "yt-dlp",
+            "--flat-playlist",
+            "--dump-json",
+            "--no-warnings",
+            "--playlist-end", "50",  # ограничение до 50 треков (можно убрать или увеличить)
+            url
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
-        if resp.status_code != 200:
-            logging.error(f"YouTube API error: {resp.status_code} - {resp.text}")
-            return jsonify({'error': f'YouTube API error: {resp.status_code}'}), 500
+        if result.returncode != 0:
+            logging.error(f"yt-dlp error: {result.stderr}")
+            return jsonify({'error': 'Failed to fetch playlist'}), 500
 
-        data = resp.json()
         tracks = []
-        playlist_title = 'YouTube Playlist'
-
-        for item in data.get('items', []):
-            snippet = item.get('snippet', {})
-            video_id = snippet.get('resourceId', {}).get('videoId')
-            if video_id:
+        playlist_title = "YouTube Playlist"
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if 'playlist_title' in data:
+                    playlist_title = data['playlist_title']
                 tracks.append({
-                    'title': snippet.get('title', 'Unknown'),
-                    'id': video_id,
-                    'url': f"https://www.youtube.com/watch?v={video_id}"
+                    'title': data.get('title', 'Unknown'),
+                    'id': data.get('id'),
+                    'url': f"https://www.youtube.com/watch?v={data.get('id')}"
                 })
-                if snippet.get('playlistTitle') and playlist_title == 'YouTube Playlist':
-                    playlist_title = snippet.get('playlistTitle')
+            except json.JSONDecodeError:
+                continue
 
         if not tracks:
             return jsonify({'error': 'No tracks found'}), 404
@@ -149,6 +143,9 @@ def playlist():
             'total': len(tracks)
         })
 
+    except subprocess.TimeoutExpired:
+        logging.error("yt-dlp timeout")
+        return jsonify({'error': 'Timeout fetching playlist'}), 500
     except Exception as e:
         logging.error(f"Playlist error: {str(e)}")
         return jsonify({'error': str(e)}), 500
