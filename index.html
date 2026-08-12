@@ -1,183 +1,594 @@
-from urllib.parse import urlparse, parse_qs
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import requests
-import time
-import logging
-import os
-import re
-import socket
-from requests.exceptions import ConnectionError
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube → MP3</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { overflow-x: hidden; }
 
-app = Flask(__name__)
-CORS(app)
-logging.basicConfig(level=logging.INFO)
+        body {
+            min-height: 100vh;
+            background-color: #ff1464;
+            background-image:
+                repeating-linear-gradient(0deg, #e01158 0 1px, transparent 1px 40px),
+                repeating-linear-gradient(90deg, #e01158 0 1px, transparent 1px 40px),
+                radial-gradient(circle at 10px 10px, #ff4d8a 3px, transparent 4px);
+            background-size: 40px 40px, 40px 40px, 40px 40px;
+            font-family: Verdana, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 40px 16px;
+        }
 
-# ===== ЭНДПОИНТ /download =====
-@app.route('/download', methods=['GET', 'OPTIONS'])
-def download():
-    if request.method == 'OPTIONS':
-        return '', 200
+        .page {
+            max-width: 620px;
+            width: 100%;
+            position: relative;
+        }
 
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'Missing url parameter'}), 400
+        .deco {
+            position: fixed;
+            pointer-events: none;
+            z-index: 0;
+            filter: drop-shadow(2px 3px 0 rgba(0,0,0,0.35));
+        }
+        @keyframes floaty {
+            0%, 100% { transform: translateY(0) rotate(var(--r, 0deg)); }
+            50% { transform: translateY(-12px) rotate(var(--r, 0deg)); }
+        }
+        @keyframes spinny { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .float { animation: floaty 3.2s ease-in-out infinite; }
+        .spin { animation: spinny 5s linear infinite; }
 
-    logging.info(f"Получен URL: {url}")
+        @media (max-width: 760px) { .deco { display: none; } }
 
-    cache_buster = int(time.time() * 1000)
+        .chrome-sub {
+            text-align: center;
+            color: #fff;
+            font-size: 12px;
+            letter-spacing: 1px;
+            margin-bottom: 26px;
+            text-transform: uppercase;
+            margin-top: 10px;
+        }
 
-    configs = [
-        {"api": "convert1s", "bitrate": "320k", "timeout": 20, "attempts": 2, "delay": 3},
-        {"api": "convert1s", "bitrate": "128k", "timeout": 20, "attempts": 5, "delay": 3}
-    ]
+        hr.thin {
+            border: none;
+            height: 1px;
+            background: #b30d45;
+            box-shadow: 0 1px 0 #ff6fa3;
+            margin: 18px 0;
+        }
 
-    for config in configs:
-        for attempt in range(config["attempts"]):
-            try:
-                if config["api"] == "convert1s":
-                    headers = {
-                        'accept': 'application/json',
-                        'content-type': 'application/json',
-                        'origin': 'https://media.ytmp3.gg',
-                        'referer': 'https://media.ytmp3.gg/',
-                        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                    }
-                    payload = {
-                        "url": url,
-                        "os": "windows",
-                        "output": {"type": "audio", "format": "mp3"},
-                        "audio": {"bitrate": config["bitrate"]},
-                        "_": cache_buster + attempt
-                    }
-                    resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=config["timeout"])
-                    if resp.status_code != 200:
-                        logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: статус {resp.status_code}")
-                        time.sleep(config["delay"])
-                        continue
-                    data = resp.json()
-                    status_url = data.get('statusUrl')
-                    if not status_url:
-                        logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: нет statusUrl")
-                        time.sleep(config["delay"])
-                        continue
-                    for _ in range(20):
-                        time.sleep(2)
-                        try:
-                            status_resp = requests.get(status_url, timeout=20)
-                            if status_resp.status_code != 200:
-                                continue
-                            status_data = status_resp.json()
-                            if 'downloadUrl' in status_data and status_data['downloadUrl']:
-                                mp3_url = status_data['downloadUrl']
-                                logging.info(f"Получена ссылка через convert1s ({config['bitrate']}) попытка {attempt+1}: {mp3_url}")
-                                return jsonify({'link': mp3_url})
-                            if status_data.get('status') == 'error' or status_data.get('state') == 'error':
-                                break
-                        except ConnectionError as e:
-                            logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка соединения: {e}")
-                            break
-                        except Exception as e:
-                            logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка при опросе: {e}")
-                            continue
-                    logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1} не удалась")
-                    time.sleep(config["delay"])
-                    continue
+        .converter-box {
+            max-width: 420px;
+            margin: 24px auto;
+            background: #d8d8d8;
+            border: 2px outset #fff;
+            padding: 18px;
+        }
+        .converter-box .title {
+            text-align: center;
+            font-weight: bold;
+            color: #003399;
+            background: linear-gradient(180deg, #fff, #b8c8e8);
+            border: 1px solid #6699cc;
+            padding: 4px;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+        .input-group {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .input-group input {
+            flex: 1;
+            min-width: 180px;
+            padding: 5px 7px;
+            border: 1px inset #808080;
+            font-size: 12px;
+            font-family: Verdana, sans-serif;
+        }
+        .input-group button {
+            padding: 5px 16px;
+            border: 1px outset #d4d0c8;
+            background: #d4d0c8;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .input-group button:active { border-style: inset; }
 
-            except Exception as e:
-                logging.error(f"Ошибка в конфигурации {config['api']} попытка {attempt+1}: {str(e)}")
-                time.sleep(config["delay"])
-                continue
+        #result {
+            margin-top: 10px;
+            padding: 8px 10px;
+            background: #000;
+            color: #0f0;
+            font-family: "Courier New", monospace;
+            font-size: 12px;
+            word-break: break-all;
+            min-height: 36px;
+            border: 1px inset #808080;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+        }
+        #result a { color: #0ff; }
+        .copy-btn {
+            border: 1px outset #d4d0c8;
+            background: #d4d0c8;
+            padding: 3px 10px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        .copy-btn:active { border-style: inset; }
+        .copy-btn.copied { background: #90ee90; }
+        .loading { color: #cc7a00; }
 
-    return jsonify({'error': 'Conversion failed after all attempts'}), 500
+        .track-list {
+            margin-top: 12px;
+            background: #000;
+            padding: 8px 10px;
+            border: 1px inset #808080;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .track-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 0;
+            border-bottom: 1px solid #333;
+            color: #0f0;
+            font-size: 12px;
+        }
+        .track-item:last-child { border-bottom: none; }
+        .track-title {
+            flex: 1;
+            margin-right: 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .track-btn {
+            background: #d4d0c8;
+            border: 1px outset #d4d0c8;
+            padding: 2px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .track-btn:active { border-style: inset; }
+        .track-btn.downloaded { background: #90ee90; }
 
-# ===== ЭНДПОИНТ /playlist (с проверкой DNS и таймаутом) =====
-@app.route('/playlist', methods=['GET'])
-def playlist():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'Missing url parameter'}), 400
+        .saved-links {
+            margin-top: 10px;
+            background: #000;
+            padding: 8px 10px;
+            border: 1px inset #808080;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+        .saved-links-title {
+            color: #0f0;
+            font-weight: bold;
+            margin-bottom: 6px;
+        }
+        .saved-link-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 0;
+            border-bottom: 1px solid #333;
+            color: #0f0;
+            font-size: 12px;
+        }
+        .saved-link-item .link-text {
+            flex: 1;
+            margin-right: 8px;
+            word-break: break-all;
+        }
+        .saved-link-item .link-text a { color: #0ff; }
+        .saved-link-item .link-copy-btn {
+            background: #d4d0c8;
+            border: 1px outset #d4d0c8;
+            padding: 2px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .saved-link-item .link-copy-btn:active { border-style: inset; }
 
-    logging.info(f"Received URL: {url}")
+        .linklist {
+            list-style: none;
+            font-size: 13px;
+            margin: 16px 0;
+        }
+        .linklist li {
+            padding: 4px 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .linklist .globe {
+            width: 14px; height: 14px;
+            border-radius: 50%;
+            background: conic-gradient(#2a7, #274 25%, #2a7 50%, #274 75%, #2a7);
+            border: 1px solid #143;
+            flex-shrink: 0;
+        }
+        .linklist a { color: #fff; text-decoration: underline; }
+        .linklist a:visited { color: #ffd6e6; }
 
-    # Проверяем DNS сразу, чтобы понять, доходит ли до сети
-    try:
-        ip = socket.gethostbyname('www.googleapis.com')
-        logging.info(f"DNS resolved www.googleapis.com to {ip}")
-    except Exception as e:
-        logging.error(f"DNS resolution failed: {e}")
-        return jsonify({'error': f'DNS resolution failed: {e}'}), 500
+        .footer {
+            text-align: center;
+            font-size: 11px;
+            color: #ffd6e6;
+            margin-top: 26px;
+            border-top: 1px solid #e01158;
+            padding-top: 10px;
+        }
+        .footer a { color: #fff; }
 
-    match = re.search(r'[?&]list=([^&]+)', url)
-    if not match:
-        logging.error(f"No list parameter found in URL: {url}")
-        return jsonify({'error': 'Invalid playlist URL: no list parameter found'}), 400
-    playlist_id = match.group(1)
-    logging.info(f"Extracted playlist ID: {playlist_id}")
+        html, body {
+            overflow: hidden;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+    </style>
+</head>
+<body>
+<div class="page">
 
-    API_KEY = os.getenv('YOUTUBE_API_KEY')
-    if not API_KEY:
-        return jsonify({'error': 'YouTube API key not configured'}), 500
+    <div class="chrome-sub">youtube → mp3 direct link</div>
 
-    all_tracks = []
-    next_page_token = None
-    max_results_per_page = 30
+    <hr class="thin">
 
-    try:
-        page_count = 0
-        while True:
-            page_count += 1
-            logging.info(f"Fetching page {page_count} with token: {next_page_token}")
+    <div class="converter-box">
+        <div class="title">★ вставь ссылку на YouTube ★</div>
+        <div class="input-group">
+            <input id="urlInput" type="text" placeholder="ссылка на YouTube" spellcheck="false">
+            <button onclick="process()">Enter</button>
+        </div>
+        <div id="result">
+            <span class="link">&gt; ожидание ссылки...</span>
+        </div>
+        <div id="trackList" class="track-list" style="display:none;"></div>
+        <div id="savedLinks" class="saved-links">
+            <div class="saved-links-title">📌 Сохранённые ссылки:</div>
+            <div id="savedLinksList"></div>
+        </div>
+    </div>
 
-            params = {
-                'part': 'snippet',
-                'maxResults': max_results_per_page,
-                'playlistId': playlist_id,
-                'key': API_KEY
+    <hr class="thin">
+
+    <ul class="linklist">
+        <li><span class="globe"></span> вставь ссылку на YouTube</li>
+        <li><span class="globe"></span> получи прямую ссылку на MP3</li>
+        <li><span class="globe"></span> ссылка работает ~1 час</li>
+    </ul>
+
+    <div class="footer">
+        lekomi's page
+    </div>
+
+</div>
+
+<script>
+    document.getElementById('urlInput').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') process();
+    });
+
+    // ===== АВТО-ДЕКОР =====
+    function getForbiddenRect() {
+        const el = document.querySelector('.page');
+        const r = el.getBoundingClientRect();
+        const pad = 24;
+        return { left: r.left - pad, right: r.right + pad, top: r.top - pad, bottom: r.bottom + pad };
+    }
+
+    function shuffle(arr) {
+        const a = arr.slice();
+        for (let i = a.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [a[i], a[j]] = [a[j], a[i]];
+        }
+        return a;
+    }
+
+    function buildGrid(count, forbidden) {
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const targetCells = Math.max(count * 2, 12);
+        const cols = Math.max(3, Math.round(Math.sqrt(targetCells * (vw / vh))));
+        const rows = Math.max(3, Math.ceil(targetCells / cols));
+        const cellW = vw / cols;
+        const cellH = vh / rows;
+
+        const cells = [];
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const x0 = c * cellW, y0 = r * cellH;
+                const x1 = x0 + cellW, y1 = y0 + cellH;
+                const overlaps = !(x1 < forbidden.left || x0 > forbidden.right || y1 < forbidden.top || y0 > forbidden.bottom);
+                if (!overlaps) cells.push({ x0, y0, w: cellW, h: cellH });
             }
-            if next_page_token:
-                params['pageToken'] = next_page_token
+        }
+        return cells;
+    }
 
-            # timeout: (connect_timeout, read_timeout)
-            resp = requests.get('https://www.googleapis.com/youtube/v3/playlistItems', params=params, timeout=(5, 60))
+    async function loadDecorations() {
+        try {
+            const res = await fetch('img/images.json');
+            if (!res.ok) return;
+            const files = await res.json();
+            if (!Array.isArray(files) || files.length === 0) return;
 
-            if resp.status_code != 200:
-                logging.error(f"YouTube API error: {resp.status_code} - {resp.text}")
-                return jsonify({'error': f'YouTube API error: {resp.status_code}'}), 500
+            const forbidden = getForbiddenRect();
+            let cells = shuffle(buildGrid(files.length, forbidden));
+            const anims = ['float', 'spin'];
+            const padIn = 6;
 
-            data = resp.json()
-            logging.info(f"Page {page_count} returned {len(data.get('items', []))} items")
+            files.forEach((filename, i) => {
+                if (cells.length === 0) cells = shuffle(buildGrid(files.length, forbidden));
+                const cell = cells.pop();
 
-            for item in data.get('items', []):
-                snippet = item.get('snippet', {})
-                video_id = snippet.get('resourceId', {}).get('videoId')
-                if video_id:
-                    all_tracks.append({
-                        'title': snippet.get('title', 'Unknown'),
-                        'id': video_id,
-                        'url': f"https://www.youtube.com/watch?v={video_id}"
-                    })
+                const maxWidth = cell.w - padIn * 2;
+                const maxHeight = cell.h - padIn * 2;
+                const maxAllowed = Math.min(maxWidth, maxHeight);
 
-            next_page_token = data.get('nextPageToken')
-            if not next_page_token:
-                break
+                const smallMin = 120, smallMax = 200;
+                const bigMin = 250, bigMax = 450;
 
-        logging.info(f"Total tracks collected: {len(all_tracks)}")
-        if not all_tracks:
-            return jsonify({'error': 'No tracks found'}), 404
+                let size;
+                if (Math.random() < 0.5) {
+                    if (maxAllowed < smallMin) {
+                        size = maxAllowed;
+                    } else {
+                        size = smallMin + Math.round(Math.random() * Math.min(smallMax - smallMin, maxAllowed - smallMin));
+                    }
+                } else {
+                    if (maxAllowed < bigMin) {
+                        size = maxAllowed;
+                    } else {
+                        size = bigMin + Math.round(Math.random() * Math.min(bigMax - bigMin, maxAllowed - bigMin));
+                    }
+                }
 
-        playlist_title = data.get('items', [{}])[0].get('snippet', {}).get('playlistTitle', 'YouTube Playlist')
+                size = Math.max(1, size);
 
-        return jsonify({
-            'playlist': playlist_title,
-            'tracks': all_tracks
-        })
+                const x = cell.x0 + padIn + Math.random() * (cell.w - size - padIn * 2);
+                const y = cell.y0 + padIn + Math.random() * (cell.h - size - padIn * 2);
 
-    except Exception as e:
-        logging.error(f"Playlist error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+                const img = document.createElement('img');
+                img.src = 'img/' + filename;
+                img.alt = '';
+                img.className = 'deco ' + anims[i % anims.length];
+                img.style.width = size + 'px';
+                img.style.setProperty('--r', (Math.random() * 24 - 12) + 'deg');
+                img.style.left = x + 'px';
+                img.style.top = y + 'px';
+                document.body.appendChild(img);
+            });
+        } catch (e) {}
+    }
+    window.addEventListener('load', loadDecorations);
+    // ===== конец авто-декора =====
 
-if __name__ == '__main__':
-    print("Starting server...")
-    app.run(host='0.0.0.0', port=8080)
-    print("Server started")
+    const API_BASE = 'https://yt-2-mp3.relaxdev.ru';
+
+    async function process() {
+        const urlInput = document.getElementById('urlInput');
+        const resultDiv = document.getElementById('result');
+        const trackListDiv = document.getElementById('trackList');
+        const savedLinksDiv = document.getElementById('savedLinks');
+        const savedLinksList = document.getElementById('savedLinksList');
+        let url = urlInput.value.trim();
+
+        // Очищаем сохранённые ссылки при новом поиске
+        savedLinksList.innerHTML = '';
+        savedLinksDiv.style.display = 'none';
+
+        if (!url) {
+            resultDiv.innerHTML = '<span class="link">⚠️ вставь ссылку на YouTube</span>';
+            trackListDiv.style.display = 'none';
+            trackListDiv.innerHTML = '';
+            return;
+        }
+
+        // Убираем возможные обратные слеши и лишние пробелы
+        url = url.replace(/\\/g, '');
+
+        // --- ЕСЛИ ЭТО НЕ ПЛЕЙЛИСТ (нет list=) ---
+        if (!url.includes('list=')) {
+            trackListDiv.style.display = 'none';
+            trackListDiv.innerHTML = '';
+            resultDiv.innerHTML = '<span class="link loading">⏳ секунду...</span>';
+            try {
+                const apiUrl = `${API_BASE}/download?url=${encodeURIComponent(url)}`;
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                if (data.link) {
+                    resultDiv.innerHTML = `
+                        <span class="link">✅ <a href="${data.link}" target="_blank">${data.link}</a></span>
+                        <button class="copy-btn" onclick="copyLink('${data.link}')">копировать</button>
+                    `;
+                } else {
+                    resultDiv.innerHTML = '<span class="link">❌ ошибка: ' + (data.error || 'неизвестная проблема') + '</span>';
+                }
+            } catch (err) {
+                resultDiv.innerHTML = '<span class="link">❌ ошибка: ' + err.message + '</span>';
+            }
+            return;
+        }
+
+        // --- ЕСЛИ ЭТО ПЛЕЙЛИСТ (есть list=) ---
+        // 1. Сначала скачиваем MP3 для текущего видео
+        resultDiv.innerHTML = '<span class="link loading">⏳ скачиваем трек...</span>';
+        trackListDiv.style.display = 'none';
+        trackListDiv.innerHTML = '';
+
+        try {
+            // Извлекаем ID видео из ссылки (параметр v=)
+            const urlParams = new URLSearchParams(new URL(url).search);
+            let videoId = urlParams.get('v');
+            
+            if (!videoId) {
+                resultDiv.innerHTML = '<span class="link">⚠️ не удалось определить трек для скачивания</span>';
+                return;
+            }
+
+            // Скачиваем MP3 для этого видео
+            const downloadUrl = `${API_BASE}/download?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`;
+            const downloadResp = await fetch(downloadUrl);
+            const downloadData = await downloadResp.json();
+
+            if (downloadData.link) {
+                resultDiv.innerHTML = `
+                    <span class="link">✅ <a href="${downloadData.link}" target="_blank">${downloadData.link}</a></span>
+                    <button class="copy-btn" onclick="copyLink('${downloadData.link}')">копировать</button>
+                `;
+            } else {
+                resultDiv.innerHTML = '<span class="link">❌ ошибка при скачивании трека: ' + (downloadData.error || 'неизвестная проблема') + '</span>';
+                return;
+            }
+
+            // 2. Теперь получаем список плейлиста
+            resultDiv.innerHTML += '<br><span class="link loading">⏳ загружаем плейлист...</span>';
+            const encodedUrl = encodeURIComponent(url);
+            const playlistResp = await fetch(`${API_BASE}/playlist?url=${encodedUrl}`);
+            const playlistData = await playlistResp.json();
+
+            if (playlistData.error) {
+                resultDiv.innerHTML += '<br><span class="link">❌ ошибка загрузки плейлиста: ' + playlistData.error + '</span>';
+                return;
+            }
+
+            if (playlistData.tracks && playlistData.tracks.length > 0) {
+                // Показываем кнопку для раскрытия списка
+                const toggleBtn = document.createElement('button');
+                toggleBtn.textContent = '📋 Показать все треки из плейлиста';
+                toggleBtn.style.marginTop = '10px';
+                toggleBtn.style.padding = '4px 12px';
+                toggleBtn.style.cursor = 'pointer';
+                toggleBtn.onclick = () => {
+                    const list = document.getElementById('trackList');
+                    if (list.style.display === 'none') {
+                        list.style.display = 'block';
+                        toggleBtn.textContent = '🔼 Скрыть треки';
+                    } else {
+                        list.style.display = 'none';
+                        toggleBtn.textContent = '📋 Показать все треки из плейлиста';
+                    }
+                };
+                resultDiv.appendChild(toggleBtn);
+
+                // Рендерим список (скрытый по умолчанию)
+                renderTrackList(playlistData.tracks);
+                document.getElementById('trackList').style.display = 'none';
+                // Показываем блок сохранённых ссылок (пустой, но доступный)
+                savedLinksDiv.style.display = 'block';
+            } else {
+                resultDiv.innerHTML += '<br><span class="link">❌ треков не найдено</span>';
+            }
+
+        } catch (err) {
+            resultDiv.innerHTML = '<span class="link">❌ ошибка: ' + err.message + '</span>';
+        }
+    }
+
+    function renderTrackList(tracks) {
+        const trackListDiv = document.getElementById('trackList');
+        trackListDiv.innerHTML = '';
+        trackListDiv.style.display = 'block';
+
+        tracks.forEach((track, index) => {
+            const item = document.createElement('div');
+            item.className = 'track-item';
+
+            const titleSpan = document.createElement('span');
+            titleSpan.className = 'track-title';
+            titleSpan.textContent = `${index+1}. ${track.title}`;
+
+            const btn = document.createElement('button');
+            btn.className = 'track-btn';
+            btn.textContent = 'mp3';
+            btn.onclick = async () => {
+                btn.textContent = '⏳';
+                btn.disabled = true;
+                try {
+                    const resp = await fetch(`${API_BASE}/download?url=${encodeURIComponent(track.url)}`);
+                    const data = await resp.json();
+                    if (data.link) {
+                        btn.textContent = '✅';
+                        btn.classList.add('downloaded');
+                        // Добавляем ссылку в сохранённые
+                        addSavedLink(track.title, data.link);
+                    } else {
+                        btn.textContent = '❌';
+                        btn.disabled = false;
+                    }
+                } catch (e) {
+                    btn.textContent = '❌';
+                    btn.disabled = false;
+                }
+            };
+
+            item.appendChild(titleSpan);
+            item.appendChild(btn);
+            trackListDiv.appendChild(item);
+        });
+    }
+
+    function addSavedLink(title, link) {
+        const list = document.getElementById('savedLinksList');
+        const item = document.createElement('div');
+        item.className = 'saved-link-item';
+
+        const textSpan = document.createElement('span');
+        textSpan.className = 'link-text';
+        textSpan.innerHTML = `${title} → <a href="${link}" target="_blank">${link}</a>`;
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'link-copy-btn';
+        copyBtn.textContent = 'копировать';
+        copyBtn.onclick = () => {
+            navigator.clipboard.writeText(link).then(() => {
+                copyBtn.textContent = '✅';
+                setTimeout(() => { copyBtn.textContent = 'копировать'; }, 2000);
+            }).catch(() => alert('не удалось скопировать'));
+        };
+
+        item.appendChild(textSpan);
+        item.appendChild(copyBtn);
+        list.appendChild(item);
+
+        // Показываем блок, если он был скрыт
+        document.getElementById('savedLinks').style.display = 'block';
+    }
+
+    function copyLink(link) {
+        navigator.clipboard.writeText(link).then(() => {
+            const btn = document.querySelector('.copy-btn');
+            if (btn) {
+                btn.textContent = '✅ скопировано';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = 'копировать';
+                    btn.classList.remove('copied');
+                }, 2500);
+            }
+        }).catch(() => {
+            alert('не удалось скопировать, скопируйте вручную');
+        });
+    }
+</script>
+</body>
+</html>
