@@ -51,6 +51,13 @@ def switch_to_next_key():
     logging.info(f"Переключились на ключ {API_KEYS[current_index][0]}")
     return True
 
+# ===== ОБЩИЕ ЗАГОЛОВКИ ДЛЯ ВСЕГО ФЛОУ (POST -> статус -> скачивание файла) =====
+COMMON_HEADERS = {
+    'origin': 'https://media.ytmp3.gg',
+    'referer': 'https://media.ytmp3.gg/',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+}
+
 # ===== ЛОГИКА КОНВЕРТАЦИИ =====
 def process_download(url):
     logging.info(f"Получен URL: {url}")
@@ -62,14 +69,16 @@ def process_download(url):
 
     for config in configs:
         for attempt in range(config["attempts"]):
+            # Единая сессия на весь цикл: POST -> опрос статуса -> сюда же передадим
+            # наружу вместе со ссылкой, чтобы куки долетели и до скачивания файла.
+            session = requests.Session()
+            session.headers.update(COMMON_HEADERS)
             try:
                 if config["api"] == "convert1s":
-                    headers = {
+                    post_headers = {
+                        **COMMON_HEADERS,
                         'accept': 'application/json',
                         'content-type': 'application/json',
-                        'origin': 'https://media.ytmp3.gg',
-                        'referer': 'https://media.ytmp3.gg/',
-                        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                     }
                     fake_url = url + f"&_={cache_buster + attempt}"
                     payload = {
@@ -78,7 +87,7 @@ def process_download(url):
                         "output": {"type": "audio", "format": "mp3"},
                         "audio": {"bitrate": config["bitrate"]}
                     }
-                    resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=config["timeout"])
+                    resp = session.post('https://hub.convert1s.com/api/download', json=payload, headers=post_headers, timeout=config["timeout"])
                     if resp.status_code != 200:
                         logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: статус {resp.status_code}")
                         time.sleep(config["delay"])
@@ -93,14 +102,16 @@ def process_download(url):
                     for _ in range(8):
                         time.sleep(2)
                         try:
-                            status_resp = requests.get(status_url, timeout=10)
+                            status_resp = session.get(status_url, timeout=10)
                             if status_resp.status_code != 200:
                                 continue
                             status_data = status_resp.json()
                             if 'downloadUrl' in status_data and status_data['downloadUrl']:
                                 mp3_url = status_data['downloadUrl']
                                 logging.info(f"Получена ссылка через convert1s ({config['bitrate']}) попытка {attempt+1}: {mp3_url}")
-                                return {'link': mp3_url}
+                                # Возвращаем саму сессию (с куками) вместе со ссылкой —
+                                # без неё финальный GET на mp3 может получить 401.
+                                return {'link': mp3_url, 'session': session}
                             if status_data.get('status') == 'error' or status_data.get('state') == 'error':
                                 break
                         except ConnectionError as e:
@@ -221,11 +232,21 @@ def playlist():
     return jsonify({'error': 'All API keys quota exceeded'}), 500
 
 # ===== ФУНКЦИЯ ДЛЯ СКАЧИВАНИЯ MP3 (с ретраями) =====
-def download_mp3(mp3_url, title, timeout=180):
+DOWNLOAD_HEADERS = {
+    'Accept': '*/*',
+    'Accept-Encoding': 'identity',  # без сжатия, чтобы честно отслеживать прогресс по chunk'ам
+    'Connection': 'keep-alive',
+    **COMMON_HEADERS,
+}
+
+def download_mp3(mp3_url, title, timeout=180, session=None):
+    # Если есть сессия из process_download (с куками convert1s) — используем её,
+    # иначе fallback на обычный requests с браузерными заголовками.
+    client = session if session is not None else requests
     for attempt in range(3):
         try:
             logging.info(f"Скачивание {title} (попытка {attempt+1})")
-            with requests.get(mp3_url, stream=True, timeout=(10, timeout)) as resp:
+            with client.get(mp3_url, headers=DOWNLOAD_HEADERS, stream=True, timeout=(10, timeout)) as resp:
                 if resp.status_code != 200:
                     logging.warning(f"Статус {resp.status_code} для {title}")
                     continue
@@ -266,7 +287,7 @@ def zip_tracks():
             idx, title = future_to_track[future]
             result = future.result()
             if 'link' in result:
-                mp3_urls.append((idx, title, result['link']))
+                mp3_urls.append((idx, title, result['link'], result.get('session')))
                 logging.info(f"Ссылка получена для {title}")
             else:
                 logging.warning(f"Не удалось получить ссылку для {title}: {result.get('error')}")
@@ -278,8 +299,8 @@ def zip_tracks():
     downloaded = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_download = {
-            executor.submit(download_mp3, url, title, 180): (idx, title)
-            for idx, title, url in mp3_urls
+            executor.submit(download_mp3, url, title, 180, sess): (idx, title)
+            for idx, title, url, sess in mp3_urls
         }
         for future in as_completed(future_to_download):
             idx, title = future_to_download[future]
@@ -371,7 +392,7 @@ def merge_tracks():
             idx, title = future_to_track[future]
             result = future.result()
             if 'link' in result:
-                mp3_urls.append((idx, title, result['link']))
+                mp3_urls.append((idx, title, result['link'], result.get('session')))
                 logging.info(f"Ссылка получена для {title}")
             else:
                 logging.warning(f"Не удалось получить ссылку для {title}: {result.get('error')}")
@@ -383,8 +404,8 @@ def merge_tracks():
     downloaded = []
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_download = {
-            executor.submit(download_mp3, url, title, 180): (idx, title)
-            for idx, title, url in mp3_urls
+            executor.submit(download_mp3, url, title, 180, sess): (idx, title)
+            for idx, title, url, sess in mp3_urls
         }
         for future in as_completed(future_to_download):
             idx, title = future_to_download[future]
@@ -475,42 +496,6 @@ def merge_from_links():
     except Exception as e:
         logging.error(f"Merge from links error: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-@app.route('/test-download', methods=['GET'])
-def test_download():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'Missing url parameter'}), 400
-
-    test_url = url
-
-    # 1. Без заголовков
-    try:
-        resp1 = requests.get(test_url, timeout=10)
-        result1 = {'status': resp1.status_code, 'len': len(resp1.content), 'preview': resp1.text[:200]}
-    except Exception as e:
-        result1 = {'error': str(e)}
-
-    # 2. С браузерными заголовками
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'audio/mpeg,audio/*;q=0.9,*/*;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Referer': 'https://media.ytmp3.gg/',
-        'Origin': 'https://media.ytmp3.gg/',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
-    }
-    try:
-        resp2 = requests.get(test_url, headers=headers, timeout=10)
-        result2 = {'status': resp2.status_code, 'len': len(resp2.content), 'preview': resp2.text[:200]}
-    except Exception as e:
-        result2 = {'error': str(e)}
-
-    return jsonify({
-        'without_headers': result1,
-        'with_headers': result2
-    })
 
 if __name__ == '__main__':
     print("Starting server...")
