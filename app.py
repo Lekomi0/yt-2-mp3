@@ -90,7 +90,8 @@ def download():
 
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
-# ===== ЭНДПОИНТ /playlist (с логированием и пагинацией) =====
+
+# ===== ЭНДПОИНТ /playlist (с ретраями и сохранением частичного результата) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     url = request.args.get('url')
@@ -110,60 +111,90 @@ def playlist():
     if not API_KEY:
         return jsonify({'error': 'YouTube API key not configured'}), 500
 
-    logging.info("Starting YouTube API request...")
-
     all_tracks = []
     next_page_token = None
-    max_results_per_page = 30
+    max_results_per_page = 50  # максимум, который разрешает сам YouTube API
+    playlist_title = 'YouTube Playlist'
+    page_count = 0
+    max_page_retries = 3
 
-    try:
-        page_count = 0
-        while True:
-            page_count += 1
-            logging.info(f"Fetching page {page_count} with token: {next_page_token}")
+    while True:
+        page_count += 1
+        logging.info(f"Fetching page {page_count} with token: {next_page_token}")
 
-            params = {
-                'part': 'snippet',
-                'maxResults': max_results_per_page,
-                'playlistId': playlist_id,
-                'key': API_KEY
-            }
-            if next_page_token:
-                params['pageToken'] = next_page_token
+        params = {
+            'part': 'snippet',
+            'maxResults': max_results_per_page,
+            'playlistId': playlist_id,
+            'key': API_KEY
+        }
+        if next_page_token:
+            params['pageToken'] = next_page_token
 
-            resp = requests.get('https://www.googleapis.com/youtube/v3/playlistItems', params=params, timeout=(5, 60))
+        page_data = None
+        last_error = None
 
-            if resp.status_code != 200:
-                logging.error(f"YouTube API error: {resp.status_code} - {resp.text}")
-                return jsonify({'error': f'YouTube API error: {resp.status_code}'}), 500
+        # ретраим текущую страницу до max_page_retries раз, прежде чем сдаться
+        for attempt in range(max_page_retries):
+            try:
+                resp = requests.get(
+                    'https://www.googleapis.com/youtube/v3/playlistItems',
+                    params=params,
+                    timeout=(5, 60)
+                )
+                if resp.status_code == 200:
+                    page_data = resp.json()
+                    break
+                else:
+                    last_error = f'YouTube API error: {resp.status_code} - {resp.text[:200]}'
+                    logging.warning(f"Page {page_count} attempt {attempt+1}: {last_error}")
+                    time.sleep(2)
+            except Exception as e:
+                last_error = str(e)
+                logging.warning(f"Page {page_count} attempt {attempt+1}: exception {last_error}")
+                time.sleep(2)
 
-            data = resp.json()
-            logging.info(f"Page {page_count} returned {len(data.get('items', []))} items")
+        if page_data is None:
+            # эта страница не поддалась после всех попыток —
+            # отдаём то, что уже успели собрать, вместо полного провала
+            logging.error(f"Page {page_count} failed after {max_page_retries} attempts: {last_error}")
+            if all_tracks:
+                return jsonify({
+                    'playlist': playlist_title,
+                    'tracks': all_tracks,
+                    'partial': True,
+                    'warning': f'Не удалось загрузить страницу {page_count}, собрано {len(all_tracks)} треков из плейлиста. Ошибка: {last_error}'
+                })
+            else:
+                return jsonify({'error': last_error or 'Unknown error fetching playlist'}), 500
 
-            for item in data.get('items', []):
-                snippet = item.get('snippet', {})
-                video_id = snippet.get('resourceId', {}).get('videoId')
-                if video_id:
-                    all_tracks.append({
-                        'title': snippet.get('title', 'Unknown'),
-                        'id': video_id,
-                        'url': f"https://www.youtube.com/watch?v={video_id}"
-                    })
+        logging.info(f"Page {page_count} returned {len(page_data.get('items', []))} items")
 
-            next_page_token = data.get('nextPageToken')
-            if not next_page_token:
-                break
+        for item in page_data.get('items', []):
+            snippet = item.get('snippet', {})
+            video_id = snippet.get('resourceId', {}).get('videoId')
+            if video_id:
+                all_tracks.append({
+                    'title': snippet.get('title', 'Unknown'),
+                    'id': video_id,
+                    'url': f"https://www.youtube.com/watch?v={video_id}"
+                })
+                if snippet.get('title') and playlist_title == 'YouTube Playlist':
+                    pass  # заголовок плейлиста YouTube API не отдаёт напрямую в этом эндпоинте
 
-        logging.info(f"Total tracks collected: {len(all_tracks)}")
-        if not all_tracks:
-            return jsonify({'error': 'No tracks found'}), 404
+        next_page_token = page_data.get('nextPageToken')
+        if not next_page_token:
+            break
 
-        playlist_title = data.get('items', [{}])[0].get('snippet', {}).get('playlistTitle', 'YouTube Playlist')
+    logging.info(f"Total tracks collected: {len(all_tracks)}")
+    if not all_tracks:
+        return jsonify({'error': 'No tracks found'}), 404
 
-        return jsonify({
-            'playlist': playlist_title,
-            'tracks': all_tracks
-        })
+    return jsonify({
+        'playlist': playlist_title,
+        'tracks': all_tracks,
+        'total': len(all_tracks)
+    })
 
     except Exception as e:
         logging.error(f"Playlist error: {str(e)}")
