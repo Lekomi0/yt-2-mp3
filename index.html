@@ -295,6 +295,7 @@
 
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
     document.getElementById('urlInput').addEventListener('keydown', function(e) {
         if (e.key === 'Enter') process();
@@ -399,6 +400,7 @@
     const API_BASE = 'https://yt-2-mp3.relaxdev.ru';
     let currentTracks = [];
 
+    // ===== ОСНОВНАЯ ЛОГИКА =====
     async function process() {
         const urlInput = document.getElementById('urlInput');
         const resultDiv = document.getElementById('result');
@@ -605,75 +607,86 @@
         });
     }
 
-    function getDownloadedLinks() {
-        const links = [];
-        document.querySelectorAll('.track-item').forEach((item) => {
-            const linkBtn = item.querySelector('a[href*=".mp3"]');
-            if (linkBtn) {
-                links.push(linkBtn.href);
-            }
+    // ===== НОВЫЕ ФУНКЦИИ ДЛЯ ZIP / MERGE (клиентское скачивание) =====
+    async function getDirectLinks(tracks) {
+        const resp = await fetch(`${API_BASE}/links`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tracks })
         });
-        return links;
+        if (!resp.ok) throw new Error('Не удалось получить ссылки');
+        const data = await resp.json();
+        // data.tracks: [{ idx, title, url, ok, error? }, ...]
+        return data.tracks.filter(t => t.ok);
     }
 
-    function getSelectedTracks() {
-        const checkboxes = document.querySelectorAll('.track-checkbox');
-        const selected = [];
-        checkboxes.forEach((cb) => {
-            if (cb.checked) {
-                const index = parseInt(cb.dataset.index);
-                selected.push(currentTracks[index]);
-            }
-        });
-        return selected;
+    async function fetchMp3Blob(url) {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Статус ${resp.status} при скачивании`);
+        return await resp.blob();
     }
 
+    // Скачать все треки как ZIP (сборка на клиенте)
+    async function downloadAsZip(tracks, onProgress) {
+        const links = await getDirectLinks(tracks);
+        if (links.length === 0) throw new Error('Нет доступных ссылок');
+        const zip = new JSZip();
+        for (let i = 0; i < links.length; i++) {
+            const { title, url } = links[i];
+            onProgress?.(`Скачивание ${i + 1}/${links.length}: ${title}`);
+            const blob = await fetchMp3Blob(url);
+            const safeTitle = title.replace(/[\\/*?:"<>|]/g, '');
+            zip.file(`${String(i + 1).padStart(2, '0')} - ${safeTitle}.mp3`, blob);
+        }
+        onProgress?.('Упаковка в ZIP...');
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(zipBlob);
+        a.download = 'playlist.zip';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+
+    // Скачать треки и склеить на сервере (через /merge-upload)
+    async function downloadAndMerge(tracks, onProgress) {
+        const links = await getDirectLinks(tracks);
+        if (links.length === 0) throw new Error('Нет доступных ссылок');
+        const formData = new FormData();
+        for (let i = 0; i < links.length; i++) {
+            const { title, url } = links[i];
+            onProgress?.(`Скачивание ${i + 1}/${links.length}: ${title}`);
+            const blob = await fetchMp3Blob(url);
+            formData.append('files', blob, `${i}.mp3`);
+        }
+        onProgress?.('Отправка на сервер для склейки...');
+        const resp = await fetch(`${API_BASE}/merge-upload`, {
+            method: 'POST',
+            body: formData
+        });
+        if (!resp.ok) throw new Error('Ошибка склейки на сервере');
+        const mergedBlob = await resp.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(mergedBlob);
+        a.download = 'merged.mp3';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+
+    // ===== НОВЫЕ ОБРАБОТЧИКИ КНОПОК =====
     async function downloadZip() {
         const btn = document.getElementById('zipBtn');
+        if (!currentTracks || currentTracks.length === 0) {
+            alert('Нет треков для скачивания');
+            return;
+        }
         btn.disabled = true;
         btn.textContent = '⏳';
-
         try {
-            // 1. Проверяем, есть ли готовые ссылки
-            const links = getDownloadedLinks();
-            if (links.length > 0) {
-                const resp = await fetch(`${API_BASE}/zip-from-links`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ links: links })
-                });
-                if (!resp.ok) throw new Error('Ошибка сервера');
-                const blob = await resp.blob();
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(blob);
-                a.download = 'playlist.zip';
-                a.click();
-                btn.disabled = false;
-                btn.textContent = '📦 Скачать ZIP';
-                return;
-            }
-
-            // 2. Иначе — конвертируем выбранные треки (или все, если ничего не выбрано)
-            const selected = getSelectedTracks();
-            if (selected.length === 0) {
-                alert('Выберите хотя бы один трек');
-                btn.disabled = false;
-                btn.textContent = '📦 Скачать ZIP';
-                return;
-            }
-            // Показываем предупреждение, что процесс может занять время
-            alert('Начинается конвертация всех треков. Это может занять 1–3 минуты в зависимости от количества треков.');
-            const resp = await fetch(`${API_BASE}/zip`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tracks: selected })
+            await downloadAsZip(currentTracks, (msg) => {
+                console.log(msg);
+                // Можно обновлять статус на кнопке
+                btn.textContent = msg;
             });
-            if (!resp.ok) throw new Error('Ошибка сервера');
-            const blob = await resp.blob();
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = 'playlist.zip';
-            a.click();
         } catch (e) {
             alert('Ошибка: ' + e.message);
         } finally {
@@ -684,47 +697,17 @@
 
     async function downloadMerge() {
         const btn = document.getElementById('mergeBtn');
+        if (!currentTracks || currentTracks.length === 0) {
+            alert('Нет треков для объединения');
+            return;
+        }
         btn.disabled = true;
         btn.textContent = '⏳';
-
         try {
-            const links = getDownloadedLinks();
-            if (links.length > 0) {
-                const resp = await fetch(`${API_BASE}/merge-from-links`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ links: links })
-                });
-                if (!resp.ok) throw new Error('Ошибка сервера');
-                const blob = await resp.blob();
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(blob);
-                a.download = 'merged.mp3';
-                a.click();
-                btn.disabled = false;
-                btn.textContent = '🔗 Объединить в один MP3';
-                return;
-            }
-
-            const selected = getSelectedTracks();
-            if (selected.length === 0) {
-                alert('Выберите хотя бы один трек');
-                btn.disabled = false;
-                btn.textContent = '🔗 Объединить в один MP3';
-                return;
-            }
-            alert('Начинается конвертация всех треков. Это может занять 1–3 минуты.');
-            const resp = await fetch(`${API_BASE}/merge`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ tracks: selected })
+            await downloadAndMerge(currentTracks, (msg) => {
+                console.log(msg);
+                btn.textContent = msg;
             });
-            if (!resp.ok) throw new Error('Ошибка сервера');
-            const blob = await resp.blob();
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = 'merged.mp3';
-            a.click();
         } catch (e) {
             alert('Ошибка: ' + e.message);
         } finally {
