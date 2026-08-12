@@ -23,16 +23,13 @@ def download():
 
     logging.info(f"Получен URL: {url}")
 
-    # Список конфигураций для попыток
     configs = [
-        {"api": "convert1s", "bitrate": "320k", "timeout": 30},
-        {"api": "convert1s", "bitrate": "128k", "timeout": 30},
-        {"api": "vevioz", "bitrate": None, "timeout": 60}
+        {"api": "convert1s", "bitrate": "320k", "timeout": 30, "attempts": 3, "delay": 5},
+        {"api": "convert1s", "bitrate": "128k", "timeout": 30, "attempts": 5, "delay": 5}
     ]
 
-    # Для каждой конфигурации делаем до 3 попыток
     for config in configs:
-        for attempt in range(3):
+        for attempt in range(config["attempts"]):
             try:
                 if config["api"] == "convert1s":
                     headers = {
@@ -51,13 +48,13 @@ def download():
                     resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=config["timeout"])
                     if resp.status_code != 200:
                         logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: статус {resp.status_code}")
-                        time.sleep(3)
+                        time.sleep(config["delay"])
                         continue
                     data = resp.json()
                     status_url = data.get('statusUrl')
                     if not status_url:
                         logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: нет statusUrl")
-                        time.sleep(3)
+                        time.sleep(config["delay"])
                         continue
                     # Опрашиваем статус
                     for _ in range(40):
@@ -79,32 +76,13 @@ def download():
                         except Exception as e:
                             logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка при опросе: {e}")
                             continue
-                    # Если не получили ссылку, пробуем следующую попытку
                     logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1} не удалась")
-                    time.sleep(3)
+                    time.sleep(config["delay"])
                     continue
-
-                elif config["api"] == "vevioz":
-                    # Альтернативный API
-                    vevioz_url = f"https://api.vevioz.com/api/button/mp3/{url}"
-                    resp = requests.get(vevioz_url, timeout=config["timeout"])
-                    if resp.status_code != 200:
-                        logging.warning(f"vevioz попытка {attempt+1}: статус {resp.status_code}")
-                        time.sleep(3)
-                        continue
-                    data = resp.json()
-                    if 'download' in data and data['download']:
-                        mp3_url = data['download']
-                        logging.info(f"Получена ссылка через vevioz попытка {attempt+1}: {mp3_url}")
-                        return jsonify({'link': mp3_url})
-                    else:
-                        logging.warning(f"vevioz попытка {attempt+1}: нет download в ответе")
-                        time.sleep(3)
-                        continue
 
             except Exception as e:
                 logging.error(f"Ошибка в конфигурации {config['api']} попытка {attempt+1}: {str(e)}")
-                time.sleep(3)
+                time.sleep(config["delay"])
                 continue
 
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
