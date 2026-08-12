@@ -5,15 +5,13 @@ import requests
 import time
 import logging
 import os
-
-# Добавим конкретный импорт для ошибок соединения
 from requests.exceptions import ConnectionError
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ===== СУЩЕСТВУЮЩИЙ ЭНДПОИНТ /download =====
+# ===== СУЩЕСТВУЮЩИЙ ЭНДПОИНТ /download (ОБНОВЛЁН) =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
     if request.method == 'OPTIONS':
@@ -25,78 +23,93 @@ def download():
 
     logging.info(f"Получен URL: {url}")
 
-    # Увеличиваем число попыток до 5
-    for attempt in range(5):
-        try:
-            headers = {
-                'accept': 'application/json',
-                'content-type': 'application/json',
-                'origin': 'https://media.ytmp3.gg',
-                'referer': 'https://media.ytmp3.gg/',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            payload = {
-                "url": url,
-                "os": "windows",
-                "output": {"type": "audio", "format": "mp3"},
-                "audio": {"bitrate": "320k"}
-            }
+    # Список конфигураций для попыток
+    configs = [
+        {"api": "convert1s", "bitrate": "320k", "timeout": 30},
+        {"api": "convert1s", "bitrate": "128k", "timeout": 30},
+        {"api": "vevioz", "bitrate": None, "timeout": 60}
+    ]
 
-            resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=30)
-            if resp.status_code != 200:
-                logging.warning(f"Попытка {attempt+1}: API вернул {resp.status_code}")
-                time.sleep(2)
-                continue
-
-            data = resp.json()
-            status_url = data.get('statusUrl')
-            if not status_url:
-                logging.warning(f"Попытка {attempt+1}: нет statusUrl")
-                time.sleep(2)
-                continue
-
-            # Опрашиваем статус до 80 секунд (40 попыток * 2 сек)
-            download_link = None
-            for _ in range(40):
-                time.sleep(2)
-                try:
-                    status_resp = requests.get(status_url, timeout=20)
-                    if status_resp.status_code != 200:
+    # Для каждой конфигурации делаем до 3 попыток
+    for config in configs:
+        for attempt in range(3):
+            try:
+                if config["api"] == "convert1s":
+                    headers = {
+                        'accept': 'application/json',
+                        'content-type': 'application/json',
+                        'origin': 'https://media.ytmp3.gg',
+                        'referer': 'https://media.ytmp3.gg/',
+                        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                    payload = {
+                        "url": url,
+                        "os": "windows",
+                        "output": {"type": "audio", "format": "mp3"},
+                        "audio": {"bitrate": config["bitrate"]}
+                    }
+                    resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=config["timeout"])
+                    if resp.status_code != 200:
+                        logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: статус {resp.status_code}")
+                        time.sleep(3)
                         continue
-                    status_data = status_resp.json()
-                    if 'downloadUrl' in status_data and status_data['downloadUrl']:
-                        download_link = status_data['downloadUrl']
-                        logging.info(f"Получена ссылка (попытка {attempt+1}): {download_link}")
-                        return jsonify({'link': download_link})
-                    if status_data.get('status') == 'error' or status_data.get('state') == 'error':
-                        # Если статус вернул ошибку, пробуем перезапустить конвертацию
-                        break
-                except ConnectionError as e:
-                    # Если хост недоступен, немедленно выходим из опроса и переходим к следующей попытке
-                    logging.error(f"Попытка {attempt+1}: ошибка соединения с {status_url}: {e}")
-                    # Прерываем опрос и переходим к следующей внешней попытке
-                    break
-                except Exception as e:
-                    logging.error(f"Попытка {attempt+1}: ошибка при опросе: {e}")
+                    data = resp.json()
+                    status_url = data.get('statusUrl')
+                    if not status_url:
+                        logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: нет statusUrl")
+                        time.sleep(3)
+                        continue
+                    # Опрашиваем статус
+                    for _ in range(40):
+                        time.sleep(2)
+                        try:
+                            status_resp = requests.get(status_url, timeout=20)
+                            if status_resp.status_code != 200:
+                                continue
+                            status_data = status_resp.json()
+                            if 'downloadUrl' in status_data and status_data['downloadUrl']:
+                                mp3_url = status_data['downloadUrl']
+                                logging.info(f"Получена ссылка через convert1s ({config['bitrate']}) попытка {attempt+1}: {mp3_url}")
+                                return jsonify({'link': mp3_url})
+                            if status_data.get('status') == 'error' or status_data.get('state') == 'error':
+                                break
+                        except ConnectionError as e:
+                            logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка соединения: {e}")
+                            break
+                        except Exception as e:
+                            logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка при опросе: {e}")
+                            continue
+                    # Если не получили ссылку, пробуем следующую попытку
+                    logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1} не удалась")
+                    time.sleep(3)
                     continue
 
-            # Если мы вышли из цикла без получения ссылки, пробуем следующую попытку
-            if download_link is None:
-                logging.warning(f"Попытка {attempt+1} не удалась, повторяем...")
-                time.sleep(2)
+                elif config["api"] == "vevioz":
+                    # Альтернативный API
+                    vevioz_url = f"https://api.vevioz.com/api/button/mp3/{url}"
+                    resp = requests.get(vevioz_url, timeout=config["timeout"])
+                    if resp.status_code != 200:
+                        logging.warning(f"vevioz попытка {attempt+1}: статус {resp.status_code}")
+                        time.sleep(3)
+                        continue
+                    data = resp.json()
+                    if 'download' in data and data['download']:
+                        mp3_url = data['download']
+                        logging.info(f"Получена ссылка через vevioz попытка {attempt+1}: {mp3_url}")
+                        return jsonify({'link': mp3_url})
+                    else:
+                        logging.warning(f"vevioz попытка {attempt+1}: нет download в ответе")
+                        time.sleep(3)
+                        continue
+
+            except Exception as e:
+                logging.error(f"Ошибка в конфигурации {config['api']} попытка {attempt+1}: {str(e)}")
+                time.sleep(3)
                 continue
-            else:
-                # Если ссылка получена, возвращаем её
-                return jsonify({'link': download_link})
 
-        except Exception as e:
-            logging.error(f"Попытка {attempt+1} упала: {str(e)}")
-            time.sleep(2)
-            continue
+    return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
-    return jsonify({'error': 'Conversion timeout after multiple attempts'}), 500
-
-# ===== НОВЫЙ ЭНДПОИНТ /playlist =====
+# ===== НОВЫЙ ЭНДПОИНТ /playlist (БЕЗ ИЗМЕНЕНИЙ) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     url = request.args.get('url')
