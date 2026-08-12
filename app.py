@@ -6,6 +6,7 @@ import time
 import logging
 import os 
 
+print("Starting app...")
 
 app = Flask(__name__)
 CORS(app)
