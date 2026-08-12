@@ -631,6 +631,46 @@ def merge_upload():
         logging.error(f"Merge upload error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# ===== ПРОКСИ-ЭНДПОИНТ ДЛЯ СКАЧИВАНИЯ MP3 НА СЕРВЕРЕ =====
+@app.route('/proxy-mp3', methods=['GET'])
+def proxy_mp3():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+
+    logging.info(f"Proxy request for: {url[:80]}...")
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Referer': 'https://media.ytmp3.gg/',
+        'Origin': 'https://media.ytmp3.gg/'
+    }
+
+    for attempt in range(3):  # до 3 попыток
+        try:
+            logging.info(f"Proxy attempt {attempt+1} for {url[:80]}")
+            resp = requests.get(url, headers=headers, stream=True, timeout=(10, 120))
+            if resp.status_code != 200:
+                logging.warning(f"Proxy status {resp.status_code} for {url[:80]}")
+                if attempt == 2:
+                    return jsonify({'error': f'Status {resp.status_code}'}), resp.status_code
+                time.sleep(2)
+                continue
+
+            return send_file(
+                io.BytesIO(resp.content),
+                mimetype='audio/mpeg',
+                as_attachment=True,
+                download_name='track.mp3'
+            )
+        except Exception as e:
+            logging.error(f"Proxy error attempt {attempt+1}: {str(e)}")
+            if attempt == 2:
+                return jsonify({'error': str(e)}), 500
+            time.sleep(2)
+
+    return jsonify({'error': 'Proxy failed after retries'}), 500
+
 if __name__ == '__main__':
     print("Starting server...")
     app.run(host='0.0.0.0', port=8080)
