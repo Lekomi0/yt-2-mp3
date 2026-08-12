@@ -244,7 +244,7 @@ def download_mp3(mp3_url, title, timeout=180):
             time.sleep(5)
     return None
 
-# ===== ЭНДПОИНТ /zip (автоматическая конвертация всех треков + параллельное скачивание) =====
+# ===== ЭНДПОИНТ /zip (параллельное получение ссылок + скачивание) =====
 @app.route('/zip', methods=['POST'])
 def zip_tracks():
     data = request.get_json()
@@ -255,15 +255,21 @@ def zip_tracks():
     if not tracks:
         return jsonify({'error': 'Empty tracks list'}), 400
 
-    # 1. Получаем ссылки для всех треков
+    # 1. Параллельно получаем ссылки для всех треков
     mp3_urls = []
-    for idx, track in enumerate(tracks):
-        logging.info(f"Получение ссылки для трека {idx+1}: {track['title']}")
-        result = process_download(track['url'])
-        if 'error' in result:
-            logging.warning(f"Не удалось получить ссылку для {track['title']}")
-            continue
-        mp3_urls.append((idx, track['title'], result['link']))
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_track = {
+            executor.submit(process_download, track['url']): (idx, track['title'])
+            for idx, track in enumerate(tracks)
+        }
+        for future in as_completed(future_to_track):
+            idx, title = future_to_track[future]
+            result = future.result()
+            if 'link' in result:
+                mp3_urls.append((idx, title, result['link']))
+                logging.info(f"Ссылка получена для {title}")
+            else:
+                logging.warning(f"Не удалось получить ссылку для {title}: {result.get('error')}")
 
     if not mp3_urls:
         return jsonify({'error': 'No MP3 links obtained'}), 500
@@ -271,9 +277,12 @@ def zip_tracks():
     # 2. Параллельное скачивание MP3
     downloaded = []
     with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_track = {executor.submit(download_mp3, url, title, 180): (idx, title) for idx, title, url in mp3_urls}
-        for future in as_completed(future_to_track):
-            idx, title = future_to_track[future]
+        future_to_download = {
+            executor.submit(download_mp3, url, title, 180): (idx, title)
+            for idx, title, url in mp3_urls
+        }
+        for future in as_completed(future_to_download):
+            idx, title = future_to_download[future]
             data = future.result()
             if data is None:
                 logging.warning(f"Не удалось скачать {title}")
@@ -300,7 +309,7 @@ def zip_tracks():
         logging.error(f"ZIP error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-# ===== ЭНДПОИНТ /zip-from-links (быстрая упаковка готовых ссылок) =====
+# ===== ЭНДПОИНТ /zip-from-links =====
 @app.route('/zip-from-links', methods=['POST'])
 def zip_from_links():
     data = request.get_json()
@@ -351,23 +360,34 @@ def merge_tracks():
     if not tracks:
         return jsonify({'error': 'Empty tracks list'}), 400
 
+    # 1. Параллельно получаем ссылки для всех треков
     mp3_urls = []
-    for idx, track in enumerate(tracks):
-        logging.info(f"Получение ссылки для трека {idx+1}: {track['title']}")
-        result = process_download(track['url'])
-        if 'error' in result:
-            logging.warning(f"Не удалось получить ссылку для {track['title']}")
-            continue
-        mp3_urls.append((idx, track['title'], result['link']))
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_track = {
+            executor.submit(process_download, track['url']): (idx, track['title'])
+            for idx, track in enumerate(tracks)
+        }
+        for future in as_completed(future_to_track):
+            idx, title = future_to_track[future]
+            result = future.result()
+            if 'link' in result:
+                mp3_urls.append((idx, title, result['link']))
+                logging.info(f"Ссылка получена для {title}")
+            else:
+                logging.warning(f"Не удалось получить ссылку для {title}: {result.get('error')}")
 
     if not mp3_urls:
         return jsonify({'error': 'No MP3 links obtained'}), 500
 
+    # 2. Параллельное скачивание MP3
     downloaded = []
     with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_track = {executor.submit(download_mp3, url, title, 180): (idx, title) for idx, title, url in mp3_urls}
-        for future in as_completed(future_to_track):
-            idx, title = future_to_track[future]
+        future_to_download = {
+            executor.submit(download_mp3, url, title, 180): (idx, title)
+            for idx, title, url in mp3_urls
+        }
+        for future in as_completed(future_to_download):
+            idx, title = future_to_download[future]
             data = future.result()
             if data is None:
                 logging.warning(f"Не удалось скачать {title}")
