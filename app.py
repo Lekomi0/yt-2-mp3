@@ -5,6 +5,7 @@ import requests
 import time
 import logging
 import os
+import re
 from requests.exceptions import ConnectionError
 
 app = Flask(__name__)
@@ -93,19 +94,22 @@ def download():
 
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
-# ===== ЭНДПОИНТ /playlist (с пагинацией) =====
+# ===== ЭНДПОИНТ /playlist (с пагинацией и надёжным извлечением list) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
 
-    parsed_url = urlparse(url)
-    query_params = parse_qs(parsed_url.query)
-    playlist_id = query_params.get('list', [None])[0]
+    logging.info(f"Received URL: {url}")
 
-    if not playlist_id:
+    # Извлекаем ID плейлиста через regex (надёжнее, чем urlparse)
+    match = re.search(r'[?&]list=([^&]+)', url)
+    if not match:
+        logging.error(f"No list parameter found in URL: {url}")
         return jsonify({'error': 'Invalid playlist URL: no list parameter found'}), 400
+    playlist_id = match.group(1)
+    logging.info(f"Extracted playlist ID: {playlist_id}")
 
     API_KEY = os.getenv('YOUTUBE_API_KEY')
     if not API_KEY:
