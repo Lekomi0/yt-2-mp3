@@ -1,9 +1,11 @@
+from urllib.parse import urlparse, parse_qs
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import time
 import logging
 import os 
+
 
 app = Flask(__name__)
 CORS(app)
@@ -78,12 +80,13 @@ def playlist():
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
 
-    # Извлекаем ID плейлиста из URL
-    import re
-    match = re.search(r'list=([a-zA-Z0-9_-]+)', url)
-    if not match:
-        return jsonify({'error': 'Invalid playlist URL'}), 400
-    playlist_id = match.group(1)
+    # Извлекаем ID плейлиста из URL (более надёжный способ)
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    playlist_id = query_params.get('list', [None])[0]
+
+    if not playlist_id:
+        return jsonify({'error': 'Invalid playlist URL: no list parameter found'}), 400
 
     # Берём ключ из переменной окружения
     API_KEY = os.getenv('YOUTUBE_API_KEY')
@@ -124,6 +127,3 @@ def playlist():
     except Exception as e:
         logging.error(f"Playlist error: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
