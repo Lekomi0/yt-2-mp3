@@ -21,7 +21,6 @@ for item in raw_keys:
         num, key = item.split(':', 1)
         API_KEYS.append((int(num.strip()), key.strip()))
     else:
-        # если формат старый (только ключ), присваиваем порядковый номер
         API_KEYS.append((len(API_KEYS)+1, item))
 
 if not API_KEYS:
@@ -32,11 +31,10 @@ logging.info(f"Загружено {len(API_KEYS)} API ключей:")
 for num, key in API_KEYS:
     logging.info(f"  Ключ {num}: {key[:10]}...")
 
-current_index = 0  # индекс в списке API_KEYS
-switch_count = 0   # сколько раз прошли полный круг
+current_index = 0
+switch_count = 0
 
 def get_current_key_info():
-    """Возвращает кортеж (номер, ключ) для текущего индекса."""
     return API_KEYS[current_index]
 
 def switch_to_next_key():
@@ -45,7 +43,7 @@ def switch_to_next_key():
         current_index += 1
     else:
         current_index = 0
-        switch_count += 1  # завершили полный круг
+        switch_count += 1
     logging.info(f"Переключились на ключ {API_KEYS[current_index][0]}")
     return True
 
@@ -128,7 +126,7 @@ def download():
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
 
-# ===== ЭНДПОИНТ /playlist (с ротацией ключей и детальным логированием) =====
+# ===== ЭНДПОИНТ /playlist (с ротацией ключей и миниатюрами) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     global switch_count
@@ -145,7 +143,7 @@ def playlist():
     playlist_id = match.group(1)
     logging.info(f"Extracted playlist ID: {playlist_id}")
 
-    max_attempts = len(API_KEYS) * 3  # запасной лимит
+    max_attempts = len(API_KEYS) * 3
     attempt = 0
 
     while attempt < max_attempts:
@@ -164,7 +162,7 @@ def playlist():
 
             if resp.status_code == 200:
                 logging.info(f"✅ Ключ {num} - работает (сейчас используется)")
-                switch_count = 0  # сброс счётчика кругов при успехе
+                switch_count = 0
                 data = resp.json()
                 tracks = []
                 playlist_title = 'YouTube Playlist'
@@ -173,10 +171,16 @@ def playlist():
                     snippet = item.get('snippet', {})
                     video_id = snippet.get('resourceId', {}).get('videoId')
                     if video_id:
+                        # Добавляем миниатюру (default — 120x90, medium — 320x180)
+                        thumbnail = snippet.get('thumbnails', {}).get('default', {}).get('url', '')
+                        if not thumbnail:
+                            # если default нет, пробуем medium
+                            thumbnail = snippet.get('thumbnails', {}).get('medium', {}).get('url', '')
                         tracks.append({
                             'title': snippet.get('title', 'Unknown'),
                             'id': video_id,
-                            'url': f"https://www.youtube.com/watch?v={video_id}"
+                            'url': f"https://www.youtube.com/watch?v={video_id}",
+                            'thumbnail': thumbnail
                         })
                         if snippet.get('playlistTitle') and playlist_title == 'YouTube Playlist':
                             playlist_title = snippet.get('playlistTitle')
@@ -194,7 +198,6 @@ def playlist():
                 logging.warning(f"❌ Ключ {num} - не работает (квота исчерпана)")
                 switch_to_next_key()
                 attempt += 1
-                # Проверяем, не прошли ли мы полный круг без успеха
                 if switch_count > 0 and switch_count % len(API_KEYS) == 0:
                     logging.warning("Все ключи перебраны без успеха. Пауза 60 секунд...")
                     time.sleep(60)
