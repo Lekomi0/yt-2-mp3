@@ -15,7 +15,7 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ===== НАСТРОЙКА РОТАЦИИ КЛЮЧЕЙ =====
+# ===== НАСТРОЙКА РОТАЦИИ КЛЮЧЕЙ (с пользовательскими номерами) =====
 raw_keys = os.getenv('YOUTUBE_API_KEYS', '').split(',')
 API_KEYS = []
 for item in raw_keys:
@@ -130,7 +130,7 @@ def download():
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
 
-# ===== ЭНДПОИНТ /playlist =====
+# ===== ЭНДПОИНТ /playlist (с ротацией ключей и миниатюрами) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     global switch_count
@@ -216,7 +216,7 @@ def playlist():
     return jsonify({'error': 'All API keys quota exceeded'}), 500
 
 
-# ===== ЭНДПОИНТ /zip =====
+# ===== ЭНДПОИНТ /zip (конвертирует и упаковывает) =====
 @app.route('/zip', methods=['POST'])
 def zip_tracks():
     data = request.get_json()
@@ -232,9 +232,8 @@ def zip_tracks():
             zip_path = os.path.join(tmpdir, 'playlist.zip')
             with zipfile.ZipFile(zip_path, 'w') as zipf:
                 for idx, track in enumerate(tracks):
-                    # Используем внутренний вызов /download
                     download_url = f"{request.host_url}download?url={track['url']}"
-                    resp = requests.get(download_url, timeout=120)
+                    resp = requests.get(download_url, timeout=180)
                     if resp.status_code != 200:
                         logging.warning(f"Не удалось скачать {track['title']}")
                         continue
@@ -242,11 +241,10 @@ def zip_tracks():
                     mp3_url = data.get('link')
                     if not mp3_url:
                         continue
-                    mp3_resp = requests.get(mp3_url, timeout=60)
+                    mp3_resp = requests.get(mp3_url, timeout=180)
                     if mp3_resp.status_code != 200:
                         continue
                     filename = f"{idx+1:02d} - {track['title']}.mp3"
-                    # Очищаем имя файла от недопустимых символов
                     safe_filename = re.sub(r'[\\/*?:"<>|]', '', filename)
                     filepath = os.path.join(tmpdir, safe_filename)
                     with open(filepath, 'wb') as f:
@@ -259,7 +257,39 @@ def zip_tracks():
         return jsonify({'error': str(e)}), 500
 
 
-# ===== ЭНДПОИНТ /merge =====
+# ===== ЭНДПОИНТ /zip-from-links (только упаковка) =====
+@app.route('/zip-from-links', methods=['POST'])
+def zip_from_links():
+    data = request.get_json()
+    if not data or 'links' not in data:
+        return jsonify({'error': 'Missing links list'}), 400
+
+    links = data['links']
+    if not links:
+        return jsonify({'error': 'Empty links list'}), 400
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = os.path.join(tmpdir, 'playlist.zip')
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                for idx, mp3_url in enumerate(links):
+                    mp3_resp = requests.get(mp3_url, timeout=60)
+                    if mp3_resp.status_code != 200:
+                        logging.warning(f"Не удалось скачать {mp3_url}")
+                        continue
+                    filename = f"track_{idx+1:02d}.mp3"
+                    filepath = os.path.join(tmpdir, filename)
+                    with open(filepath, 'wb') as f:
+                        f.write(mp3_resp.content)
+                    zipf.write(filepath, filename)
+            return send_file(zip_path, as_attachment=True, download_name='playlist.zip')
+
+    except Exception as e:
+        logging.error(f"ZIP error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ===== ЭНДПОИНТ /merge (конвертирует и объединяет) =====
 @app.route('/merge', methods=['POST'])
 def merge_tracks():
     data = request.get_json()
@@ -275,13 +305,59 @@ def merge_tracks():
             mp3_files = []
             for idx, track in enumerate(tracks):
                 download_url = f"{request.host_url}download?url={track['url']}"
-                resp = requests.get(download_url, timeout=120)
+                resp = requests.get(download_url, timeout=180)
                 if resp.status_code != 200:
                     continue
                 data = resp.json()
                 mp3_url = data.get('link')
                 if not mp3_url:
                     continue
+                mp3_resp = requests.get(mp3_url, timeout=180)
+                if mp3_resp.status_code != 200:
+                    continue
+                filename = f"{idx:04d}.mp3"
+                filepath = os.path.join(tmpdir, filename)
+                with open(filepath, 'wb') as f:
+                    f.write(mp3_resp.content)
+                mp3_files.append(filepath)
+
+            if not mp3_files:
+                return jsonify({'error': 'No MP3 files downloaded'}), 500
+
+            list_path = os.path.join(tmpdir, 'list.txt')
+            with open(list_path, 'w') as f:
+                for mp3 in mp3_files:
+                    f.write(f"file '{os.path.basename(mp3)}'\n")
+
+            output_path = os.path.join(tmpdir, 'merged.mp3')
+            cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy', output_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=tmpdir, timeout=180)
+            if result.returncode != 0:
+                logging.error(f"FFmpeg error: {result.stderr}")
+                return jsonify({'error': 'FFmpeg merge failed'}), 500
+
+            return send_file(output_path, as_attachment=True, download_name='merged.mp3')
+
+    except Exception as e:
+        logging.error(f"Merge error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ===== ЭНДПОИНТ /merge-from-links (только объединение) =====
+@app.route('/merge-from-links', methods=['POST'])
+def merge_from_links():
+    data = request.get_json()
+    if not data or 'links' not in data:
+        return jsonify({'error': 'Missing links list'}), 400
+
+    links = data['links']
+    if not links:
+        return jsonify({'error': 'Empty links list'}), 400
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mp3_files = []
+            for idx, mp3_url in enumerate(links):
                 mp3_resp = requests.get(mp3_url, timeout=60)
                 if mp3_resp.status_code != 200:
                     continue
@@ -294,16 +370,14 @@ def merge_tracks():
             if not mp3_files:
                 return jsonify({'error': 'No MP3 files downloaded'}), 500
 
-            # Создаём файл списка для FFmpeg
             list_path = os.path.join(tmpdir, 'list.txt')
             with open(list_path, 'w') as f:
                 for mp3 in mp3_files:
-                    # Используем относительный путь внутри контейнера
                     f.write(f"file '{os.path.basename(mp3)}'\n")
 
             output_path = os.path.join(tmpdir, 'merged.mp3')
             cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy', output_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=tmpdir)
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=tmpdir, timeout=180)
             if result.returncode != 0:
                 logging.error(f"FFmpeg error: {result.stderr}")
                 return jsonify({'error': 'FFmpeg merge failed'}), 500
