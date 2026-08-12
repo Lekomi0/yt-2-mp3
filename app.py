@@ -9,6 +9,7 @@ import re
 import zipfile
 import tempfile
 import subprocess
+import io
 from requests.exceptions import ConnectionError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
