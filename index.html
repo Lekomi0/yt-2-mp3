@@ -390,7 +390,7 @@
         const trackListDiv = document.getElementById('trackList');
         const savedLinksDiv = document.getElementById('savedLinks');
         const savedLinksList = document.getElementById('savedLinksList');
-        const url = urlInput.value.trim();
+        let url = urlInput.value.trim();
 
         // Очищаем сохранённые ссылки при новом поиске
         savedLinksList.innerHTML = '';
@@ -402,6 +402,9 @@
             trackListDiv.innerHTML = '';
             return;
         }
+
+        // Убираем возможные обратные слеши и лишние пробелы
+        url = url.replace(/\\/g, '');
 
         // --- ЕСЛИ ЭТО НЕ ПЛЕЙЛИСТ (нет list=) ---
         if (!url.includes('list=')) {
