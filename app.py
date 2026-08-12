@@ -4,7 +4,7 @@ from flask_cors import CORS
 import requests
 import time
 import logging
-import os 
+import os
 
 print("Starting app...")
 print("Creating Flask app...")
@@ -131,7 +131,9 @@ def playlist():
     except Exception as e:
         logging.error(f"Playlist error: {str(e)}")
         return jsonify({'error': str(e)}), 500
-        if __name__ == '__main__':
+
+
+if __name__ == '__main__':
     print("Starting server...")
     app.run(host='0.0.0.0', port=8080)
     print("Server started")
