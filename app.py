@@ -6,14 +6,12 @@ import time
 import logging
 import os
 
-print("Starting app...")
-print("Creating Flask app...")
+# Добавим конкретный импорт для ошибок соединения
+from requests.exceptions import ConnectionError
+
 app = Flask(__name__)
-print("Flask app created")
 CORS(app)
-print("CORS enabled")
 logging.basicConfig(level=logging.INFO)
-print("Logging configured")
 
 # ===== СУЩЕСТВУЮЩИЙ ЭНДПОИНТ /download =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
@@ -27,8 +25,8 @@ def download():
 
     logging.info(f"Получен URL: {url}")
 
-    # Делаем до 3 попыток
-    for attempt in range(3):
+    # Увеличиваем число попыток до 5
+    for attempt in range(5):
         try:
             headers = {
                 'accept': 'application/json',
@@ -47,33 +45,54 @@ def download():
             resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=30)
             if resp.status_code != 200:
                 logging.warning(f"Попытка {attempt+1}: API вернул {resp.status_code}")
+                time.sleep(2)
                 continue
 
             data = resp.json()
             status_url = data.get('statusUrl')
             if not status_url:
                 logging.warning(f"Попытка {attempt+1}: нет statusUrl")
+                time.sleep(2)
                 continue
 
             # Опрашиваем статус до 80 секунд (40 попыток * 2 сек)
+            download_link = None
             for _ in range(40):
                 time.sleep(2)
-                status_resp = requests.get(status_url, timeout=20)
-                if status_resp.status_code != 200:
-                    continue
-                status_data = status_resp.json()
-                if 'downloadUrl' in status_data and status_data['downloadUrl']:
-                    mp3_url = status_data['downloadUrl']
-                    logging.info(f"Получена ссылка (попытка {attempt+1}): {mp3_url}")
-                    return jsonify({'link': mp3_url})
-                if status_data.get('status') == 'error' or status_data.get('state') == 'error':
+                try:
+                    status_resp = requests.get(status_url, timeout=20)
+                    if status_resp.status_code != 200:
+                        continue
+                    status_data = status_resp.json()
+                    if 'downloadUrl' in status_data and status_data['downloadUrl']:
+                        download_link = status_data['downloadUrl']
+                        logging.info(f"Получена ссылка (попытка {attempt+1}): {download_link}")
+                        return jsonify({'link': download_link})
+                    if status_data.get('status') == 'error' or status_data.get('state') == 'error':
+                        # Если статус вернул ошибку, пробуем перезапустить конвертацию
+                        break
+                except ConnectionError as e:
+                    # Если хост недоступен, немедленно выходим из опроса и переходим к следующей попытке
+                    logging.error(f"Попытка {attempt+1}: ошибка соединения с {status_url}: {e}")
+                    # Прерываем опрос и переходим к следующей внешней попытке
                     break
+                except Exception as e:
+                    logging.error(f"Попытка {attempt+1}: ошибка при опросе: {e}")
+                    continue
+
+            # Если мы вышли из цикла без получения ссылки, пробуем следующую попытку
+            if download_link is None:
+                logging.warning(f"Попытка {attempt+1} не удалась, повторяем...")
+                time.sleep(2)
+                continue
+            else:
+                # Если ссылка получена, возвращаем её
+                return jsonify({'link': download_link})
 
         except Exception as e:
             logging.error(f"Попытка {attempt+1} упала: {str(e)}")
+            time.sleep(2)
             continue
-
-        logging.warning(f"Попытка {attempt+1} не удалась, повторяем...")
 
     return jsonify({'error': 'Conversion timeout after multiple attempts'}), 500
 
