@@ -7,10 +7,13 @@ import logging
 import os 
 
 print("Starting app...")
-
+print("Creating Flask app...")
 app = Flask(__name__)
+print("Flask app created")
 CORS(app)
+print("CORS enabled")
 logging.basicConfig(level=logging.INFO)
+print("Logging configured")
 
 # ===== СУЩЕСТВУЮЩИЙ ЭНДПОИНТ /download =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
