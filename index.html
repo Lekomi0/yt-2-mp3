@@ -354,27 +354,22 @@
             return;
         }
 
-        // Если есть list= — пытаемся загрузить плейлист
-        if (url.includes('list=')) {
-            resultDiv.innerHTML = '<span class="link loading">⏳ загружаем плейлист...</span>';
+        // --- ЕСЛИ ЭТО НЕ ПЛЕЙЛИСТ (нет list=) ---
+        if (!url.includes('list=')) {
             trackListDiv.style.display = 'none';
             trackListDiv.innerHTML = '';
-
+            resultDiv.innerHTML = '<span class="link loading">⏳ секунду...</span>';
             try {
-                const encodedUrl = encodeURIComponent(url);
-                const resp = await fetch(`${API_BASE}/playlist?url=${encodedUrl}`);
-                const data = await resp.json();
-
-                if (data.error) {
-                    resultDiv.innerHTML = '<span class="link">❌ ошибка: ' + data.error + '</span>';
-                    return;
-                }
-
-                if (data.tracks && data.tracks.length > 0) {
-                    resultDiv.innerHTML = `<span class="link">📋 плейлист: ${data.playlist || 'YouTube Playlist'} (${data.tracks.length} треков)</span>`;
-                    renderTrackList(data.tracks);
+                const apiUrl = `${API_BASE}/download?url=${encodeURIComponent(url)}`;
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                if (data.link) {
+                    resultDiv.innerHTML = `
+                        <span class="link">✅ <a href="${data.link}" target="_blank">${data.link}</a></span>
+                        <button class="copy-btn" onclick="copyLink('${data.link}')">копировать</button>
+                    `;
                 } else {
-                    resultDiv.innerHTML = '<span class="link">❌ треков не найдено</span>';
+                    resultDiv.innerHTML = '<span class="link">❌ ошибка: ' + (data.error || 'неизвестная проблема') + '</span>';
                 }
             } catch (err) {
                 resultDiv.innerHTML = '<span class="link">❌ ошибка: ' + err.message + '</span>';
@@ -382,24 +377,74 @@
             return;
         }
 
-        // Обычный трек (без list=)
+        // --- ЕСЛИ ЭТО ПЛЕЙЛИСТ (есть list=) ---
+        // 1. Сначала скачиваем MP3 для текущего видео
+        resultDiv.innerHTML = '<span class="link loading">⏳ скачиваем трек...</span>';
         trackListDiv.style.display = 'none';
         trackListDiv.innerHTML = '';
-        resultDiv.innerHTML = '<span class="link loading">⏳ секунду...</span>';
 
         try {
-            const apiUrl = `${API_BASE}/download?url=${encodeURIComponent(url)}`;
-            const response = await fetch(apiUrl);
-            const data = await response.json();
+            // Извлекаем ID видео из ссылки (параметр v=)
+            const urlParams = new URLSearchParams(new URL(url).search);
+            let videoId = urlParams.get('v');
+            
+            if (!videoId) {
+                resultDiv.innerHTML = '<span class="link">⚠️ не удалось определить трек для скачивания</span>';
+                return;
+            }
 
-            if (data.link) {
+            // Скачиваем MP3 для этого видео
+            const downloadUrl = `${API_BASE}/download?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`;
+            const downloadResp = await fetch(downloadUrl);
+            const downloadData = await downloadResp.json();
+
+            if (downloadData.link) {
                 resultDiv.innerHTML = `
-                    <span class="link">✅ <a href="${data.link}" target="_blank">${data.link}</a></span>
-                    <button class="copy-btn" onclick="copyLink('${data.link}')">копировать</button>
+                    <span class="link">✅ <a href="${downloadData.link}" target="_blank">${downloadData.link}</a></span>
+                    <button class="copy-btn" onclick="copyLink('${downloadData.link}')">копировать</button>
                 `;
             } else {
-                resultDiv.innerHTML = '<span class="link">❌ ошибка: ' + (data.error || 'неизвестная проблема') + '</span>';
+                resultDiv.innerHTML = '<span class="link">❌ ошибка при скачивании трека: ' + (downloadData.error || 'неизвестная проблема') + '</span>';
+                return;
             }
+
+            // 2. Теперь получаем список плейлиста
+            resultDiv.innerHTML += '<br><span class="link loading">⏳ загружаем плейлист...</span>';
+            const encodedUrl = encodeURIComponent(url);
+            const playlistResp = await fetch(`${API_BASE}/playlist?url=${encodedUrl}`);
+            const playlistData = await playlistResp.json();
+
+            if (playlistData.error) {
+                resultDiv.innerHTML += '<br><span class="link">❌ ошибка загрузки плейлиста: ' + playlistData.error + '</span>';
+                return;
+            }
+
+            if (playlistData.tracks && playlistData.tracks.length > 0) {
+                // Показываем кнопку для раскрытия списка
+                const toggleBtn = document.createElement('button');
+                toggleBtn.textContent = '📋 Показать все треки из плейлиста';
+                toggleBtn.style.marginTop = '10px';
+                toggleBtn.style.padding = '4px 12px';
+                toggleBtn.style.cursor = 'pointer';
+                toggleBtn.onclick = () => {
+                    const list = document.getElementById('trackList');
+                    if (list.style.display === 'none') {
+                        list.style.display = 'block';
+                        toggleBtn.textContent = '🔼 Скрыть треки';
+                    } else {
+                        list.style.display = 'none';
+                        toggleBtn.textContent = '📋 Показать все треки из плейлиста';
+                    }
+                };
+                resultDiv.appendChild(toggleBtn);
+
+                // Рендерим список (скрытый по умолчанию)
+                renderTrackList(playlistData.tracks);
+                document.getElementById('trackList').style.display = 'none';
+            } else {
+                resultDiv.innerHTML += '<br><span class="link">❌ треков не найдено</span>';
+            }
+
         } catch (err) {
             resultDiv.innerHTML = '<span class="link">❌ ошибка: ' + err.message + '</span>';
         }
@@ -430,7 +475,6 @@
                     if (data.link) {
                         btn.textContent = '✅';
                         btn.classList.add('downloaded');
-                        // Показываем ссылку в result
                         const resultDiv = document.getElementById('result');
                         resultDiv.innerHTML = `
                             <span class="link">✅ <a href="${data.link}" target="_blank">${data.link}</a></span>
