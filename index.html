@@ -276,7 +276,7 @@
         </div>
         <div id="trackList" class="track-list" style="display:none;"></div>
         <div id="batchButtons" class="batch-buttons" style="display:none;">
-            <button id="zipBtn" onclick="downloadZip()">📦 Скачать ZIP (выбранные)</button>
+            <button id="zipBtn" onclick="downloadZip()">📦 Скачать ZIP</button>
             <button id="mergeBtn" onclick="downloadMerge()">🔗 Объединить в один MP3</button>
         </div>
     </div>
@@ -517,6 +517,7 @@
         tracks.forEach((track, index) => {
             const item = document.createElement('div');
             item.className = 'track-item';
+            item.dataset.url = track.url;  // сохраняем URL для сбора ссылок
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
@@ -604,6 +605,17 @@
         });
     }
 
+    function getDownloadedLinks() {
+        const links = [];
+        document.querySelectorAll('.track-item').forEach((item) => {
+            const linkBtn = item.querySelector('.track-link-btn');
+            if (linkBtn) {
+                links.push(linkBtn.href);
+            }
+        });
+        return links;
+    }
+
     function getSelectedTracks() {
         const checkboxes = document.querySelectorAll('.track-checkbox');
         const selected = [];
@@ -617,15 +629,38 @@
     }
 
     async function downloadZip() {
-        const selected = getSelectedTracks();
-        if (selected.length === 0) {
-            alert('Выберите хотя бы один трек');
-            return;
-        }
         const btn = document.getElementById('zipBtn');
         btn.disabled = true;
         btn.textContent = '⏳';
+
         try {
+            // 1. Проверяем, есть ли готовые ссылки
+            const links = getDownloadedLinks();
+            if (links.length > 0) {
+                const resp = await fetch(`${API_BASE}/zip-from-links`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ links: links })
+                });
+                if (!resp.ok) throw new Error('Ошибка сервера');
+                const blob = await resp.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'playlist.zip';
+                a.click();
+                btn.disabled = false;
+                btn.textContent = '📦 Скачать ZIP';
+                return;
+            }
+
+            // 2. Иначе — конвертируем выбранные треки
+            const selected = getSelectedTracks();
+            if (selected.length === 0) {
+                alert('Выберите хотя бы один трек');
+                btn.disabled = false;
+                btn.textContent = '📦 Скачать ZIP';
+                return;
+            }
             const resp = await fetch(`${API_BASE}/zip`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -641,20 +676,41 @@
             alert('Ошибка: ' + e.message);
         } finally {
             btn.disabled = false;
-            btn.textContent = '📦 Скачать ZIP (выбранные)';
+            btn.textContent = '📦 Скачать ZIP';
         }
     }
 
     async function downloadMerge() {
-        const selected = getSelectedTracks();
-        if (selected.length === 0) {
-            alert('Выберите хотя бы один трек');
-            return;
-        }
         const btn = document.getElementById('mergeBtn');
         btn.disabled = true;
         btn.textContent = '⏳';
+
         try {
+            const links = getDownloadedLinks();
+            if (links.length > 0) {
+                const resp = await fetch(`${API_BASE}/merge-from-links`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ links: links })
+                });
+                if (!resp.ok) throw new Error('Ошибка сервера');
+                const blob = await resp.blob();
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'merged.mp3';
+                a.click();
+                btn.disabled = false;
+                btn.textContent = '🔗 Объединить в один MP3';
+                return;
+            }
+
+            const selected = getSelectedTracks();
+            if (selected.length === 0) {
+                alert('Выберите хотя бы один трек');
+                btn.disabled = false;
+                btn.textContent = '🔗 Объединить в один MP3';
+                return;
+            }
             const resp = await fetch(`${API_BASE}/merge`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
