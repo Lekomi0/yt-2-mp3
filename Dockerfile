@@ -7,6 +7,6 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 COPY . .
-RUN pip install --no-cache-dir yt-dlp yt-dlp-ytse
+RUN pip install --upgrade yt-dlp yt-dlp-ytse
 
 CMD python app.py
