@@ -476,6 +476,42 @@ def merge_from_links():
         logging.error(f"Merge from links error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/test-download', methods=['GET'])
+def test_download():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+
+    # Ссылка, которую будем тестировать
+    test_url = url
+
+    # 1. Без заголовков (как сейчас)
+    try:
+        resp1 = requests.get(test_url, timeout=10)
+        result1 = {'status': resp1.status_code, 'len': len(resp1.content)}
+    except Exception as e:
+        result1 = {'error': str(e)}
+
+    # 2. С браузерными заголовками
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'audio/mpeg,audio/*;q=0.9,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Referer': 'https://media.ytmp3.gg/',
+        'Origin': 'https://media.ytmp3.gg/'
+    }
+    try:
+        resp2 = requests.get(test_url, headers=headers, timeout=10)
+        result2 = {'status': resp2.status_code, 'len': len(resp2.content)}
+    except Exception as e:
+        result2 = {'error': str(e)}
+
+    return jsonify({
+        'without_headers': result1,
+        'with_headers': result2
+    })
+
 if __name__ == '__main__':
     print("Starting server...")
     app.run(host='0.0.0.0', port=8080)
