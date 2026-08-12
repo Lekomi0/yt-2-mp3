@@ -140,17 +140,22 @@
         }
         .track-item {
             display: flex;
-            justify-content: space-between;
             align-items: center;
             padding: 4px 0;
             border-bottom: 1px solid #333;
             color: #0f0;
             font-size: 12px;
+            gap: 8px;
         }
         .track-item:last-child { border-bottom: none; }
+        .track-thumb {
+            width: 40px;
+            height: 30px;
+            object-fit: cover;
+            flex-shrink: 0;
+        }
         .track-title {
             flex: 1;
-            margin-right: 8px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -392,7 +397,6 @@
         const savedLinksList = document.getElementById('savedLinksList');
         let url = urlInput.value.trim();
 
-        // Очищаем сохранённые ссылки при новом поиске
         savedLinksList.innerHTML = '';
         savedLinksDiv.style.display = 'none';
 
@@ -403,10 +407,8 @@
             return;
         }
 
-        // Убираем возможные обратные слеши и лишние пробелы
         url = url.replace(/\\/g, '');
 
-        // --- ЕСЛИ ЭТО НЕ ПЛЕЙЛИСТ (нет list=) ---
         if (!url.includes('list=')) {
             trackListDiv.style.display = 'none';
             trackListDiv.innerHTML = '';
@@ -429,14 +431,11 @@
             return;
         }
 
-        // --- ЕСЛИ ЭТО ПЛЕЙЛИСТ (есть list=) ---
-        // 1. Сначала скачиваем MP3 для текущего видео
         resultDiv.innerHTML = '<span class="link loading">⏳ скачиваем трек...</span>';
         trackListDiv.style.display = 'none';
         trackListDiv.innerHTML = '';
 
         try {
-            // Извлекаем ID видео из ссылки (параметр v=)
             const urlParams = new URLSearchParams(new URL(url).search);
             let videoId = urlParams.get('v');
             
@@ -445,7 +444,6 @@
                 return;
             }
 
-            // Скачиваем MP3 для этого видео
             const downloadUrl = `${API_BASE}/download?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`;
             const downloadResp = await fetch(downloadUrl);
             const downloadData = await downloadResp.json();
@@ -460,7 +458,6 @@
                 return;
             }
 
-            // 2. Теперь получаем список плейлиста
             resultDiv.innerHTML += '<br><span class="link loading">⏳ загружаем плейлист...</span>';
             const encodedUrl = encodeURIComponent(url);
             const playlistResp = await fetch(`${API_BASE}/playlist?url=${encodedUrl}`);
@@ -472,7 +469,6 @@
             }
 
             if (playlistData.tracks && playlistData.tracks.length > 0) {
-                // Показываем кнопку для раскрытия списка
                 const toggleBtn = document.createElement('button');
                 toggleBtn.textContent = '📋 Показать все треки из плейлиста';
                 toggleBtn.style.marginTop = '10px';
@@ -490,10 +486,8 @@
                 };
                 resultDiv.appendChild(toggleBtn);
 
-                // Рендерим список (скрытый по умолчанию)
                 renderTrackList(playlistData.tracks);
                 document.getElementById('trackList').style.display = 'none';
-                // Показываем блок сохранённых ссылок (пустой, но доступный)
                 savedLinksDiv.style.display = 'block';
             } else {
                 resultDiv.innerHTML += '<br><span class="link">❌ треков не найдено</span>';
@@ -513,6 +507,15 @@
             const item = document.createElement('div');
             item.className = 'track-item';
 
+            // Картинка
+            const img = document.createElement('img');
+            img.className = 'track-thumb';
+            img.src = track.thumbnail || '';
+            img.alt = '';
+            if (!track.thumbnail) {
+                img.style.display = 'none';
+            }
+
             const titleSpan = document.createElement('span');
             titleSpan.className = 'track-title';
             titleSpan.textContent = `${index+1}. ${track.title}`;
@@ -529,7 +532,6 @@
                     if (data.link) {
                         btn.textContent = '✅';
                         btn.classList.add('downloaded');
-                        // Добавляем ссылку в сохранённые
                         addSavedLink(track.title, data.link);
                     } else {
                         btn.textContent = '❌';
@@ -541,6 +543,7 @@
                 }
             };
 
+            item.appendChild(img);
             item.appendChild(titleSpan);
             item.appendChild(btn);
             trackListDiv.appendChild(item);
@@ -569,8 +572,6 @@
         item.appendChild(textSpan);
         item.appendChild(copyBtn);
         list.appendChild(item);
-
-        // Показываем блок, если он был скрыт
         document.getElementById('savedLinks').style.display = 'block';
     }
 
