@@ -93,7 +93,7 @@ def download():
     return jsonify({'error': 'Conversion failed after all attempts'}), 500
 
 
-# ===== ЭНДПОИНТ /playlist (через yt-dlp, без YouTube API) =====
+# ===== ЭНДПОИНТ /playlist (через yt-dlp-ytse с обходом блокировок) =====
 @app.route('/playlist', methods=['GET'])
 def playlist():
     url = request.args.get('url')
@@ -108,10 +108,13 @@ def playlist():
             "--flat-playlist",
             "--dump-json",
             "--no-warnings",
-            "--playlist-end", "50",  # ограничение до 50 треков (можно убрать или увеличить)
+            "--no-check-certificate",
+            "-4",
+            "--extractor-args", "youtube:player-client=web,default",
+            "--playlist-end", "50",
             url
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
         if result.returncode != 0:
             logging.error(f"yt-dlp error: {result.stderr}")
