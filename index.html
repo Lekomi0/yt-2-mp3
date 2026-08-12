@@ -608,7 +608,7 @@
     function getDownloadedLinks() {
         const links = [];
         document.querySelectorAll('.track-item').forEach((item) => {
-            const linkBtn = item.querySelector('.track-link-btn');
+            const linkBtn = item.querySelector('a[href*=".mp3"]');
             if (linkBtn) {
                 links.push(linkBtn.href);
             }
@@ -653,7 +653,7 @@
                 return;
             }
 
-            // 2. Иначе — конвертируем выбранные треки
+            // 2. Иначе — конвертируем выбранные треки (или все, если ничего не выбрано)
             const selected = getSelectedTracks();
             if (selected.length === 0) {
                 alert('Выберите хотя бы один трек');
@@ -661,6 +661,8 @@
                 btn.textContent = '📦 Скачать ZIP';
                 return;
             }
+            // Показываем предупреждение, что процесс может занять время
+            alert('Начинается конвертация всех треков. Это может занять 1–3 минуты в зависимости от количества треков.');
             const resp = await fetch(`${API_BASE}/zip`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -711,6 +713,7 @@
                 btn.textContent = '🔗 Объединить в один MP3';
                 return;
             }
+            alert('Начинается конвертация всех треков. Это может занять 1–3 минуты.');
             const resp = await fetch(`${API_BASE}/merge`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
