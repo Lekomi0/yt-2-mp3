@@ -166,6 +166,45 @@
         .track-btn:active { border-style: inset; }
         .track-btn.downloaded { background: #90ee90; }
 
+        .saved-links {
+            margin-top: 10px;
+            background: #000;
+            padding: 8px 10px;
+            border: 1px inset #808080;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+        .saved-links-title {
+            color: #0f0;
+            font-weight: bold;
+            margin-bottom: 6px;
+        }
+        .saved-link-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 0;
+            border-bottom: 1px solid #333;
+            color: #0f0;
+            font-size: 12px;
+        }
+        .saved-link-item .link-text {
+            flex: 1;
+            margin-right: 8px;
+            word-break: break-all;
+        }
+        .saved-link-item .link-text a { color: #0ff; }
+        .saved-link-item .link-copy-btn {
+            background: #d4d0c8;
+            border: 1px outset #d4d0c8;
+            padding: 2px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .saved-link-item .link-copy-btn:active { border-style: inset; }
+
         .linklist {
             list-style: none;
             font-size: 13px;
@@ -222,6 +261,10 @@
             <span class="link">&gt; ожидание ссылки...</span>
         </div>
         <div id="trackList" class="track-list" style="display:none;"></div>
+        <div id="savedLinks" class="saved-links">
+            <div class="saved-links-title">📌 Сохранённые ссылки:</div>
+            <div id="savedLinksList"></div>
+        </div>
     </div>
 
     <hr class="thin">
@@ -345,7 +388,13 @@
         const urlInput = document.getElementById('urlInput');
         const resultDiv = document.getElementById('result');
         const trackListDiv = document.getElementById('trackList');
+        const savedLinksDiv = document.getElementById('savedLinks');
+        const savedLinksList = document.getElementById('savedLinksList');
         const url = urlInput.value.trim();
+
+        // Очищаем сохранённые ссылки при новом поиске
+        savedLinksList.innerHTML = '';
+        savedLinksDiv.style.display = 'none';
 
         if (!url) {
             resultDiv.innerHTML = '<span class="link">⚠️ вставь ссылку на YouTube</span>';
@@ -441,6 +490,8 @@
                 // Рендерим список (скрытый по умолчанию)
                 renderTrackList(playlistData.tracks);
                 document.getElementById('trackList').style.display = 'none';
+                // Показываем блок сохранённых ссылок (пустой, но доступный)
+                savedLinksDiv.style.display = 'block';
             } else {
                 resultDiv.innerHTML += '<br><span class="link">❌ треков не найдено</span>';
             }
@@ -475,11 +526,8 @@
                     if (data.link) {
                         btn.textContent = '✅';
                         btn.classList.add('downloaded');
-                        const resultDiv = document.getElementById('result');
-                        resultDiv.innerHTML = `
-                            <span class="link">✅ <a href="${data.link}" target="_blank">${data.link}</a></span>
-                            <button class="copy-btn" onclick="copyLink('${data.link}')">копировать</button>
-                        `;
+                        // Добавляем ссылку в сохранённые
+                        addSavedLink(track.title, data.link);
                     } else {
                         btn.textContent = '❌';
                         btn.disabled = false;
@@ -494,6 +542,33 @@
             item.appendChild(btn);
             trackListDiv.appendChild(item);
         });
+    }
+
+    function addSavedLink(title, link) {
+        const list = document.getElementById('savedLinksList');
+        const item = document.createElement('div');
+        item.className = 'saved-link-item';
+
+        const textSpan = document.createElement('span');
+        textSpan.className = 'link-text';
+        textSpan.innerHTML = `${title} → <a href="${link}" target="_blank">${link}</a>`;
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'link-copy-btn';
+        copyBtn.textContent = 'копировать';
+        copyBtn.onclick = () => {
+            navigator.clipboard.writeText(link).then(() => {
+                copyBtn.textContent = '✅';
+                setTimeout(() => { copyBtn.textContent = 'копировать'; }, 2000);
+            }).catch(() => alert('не удалось скопировать'));
+        };
+
+        item.appendChild(textSpan);
+        item.appendChild(copyBtn);
+        list.appendChild(item);
+
+        // Показываем блок, если он был скрыт
+        document.getElementById('savedLinks').style.display = 'block';
     }
 
     function copyLink(link) {
