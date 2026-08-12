@@ -131,3 +131,7 @@ def playlist():
     except Exception as e:
         logging.error(f"Playlist error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+        if __name__ == '__main__':
+    print("Starting server...")
+    app.run(host='0.0.0.0', port=8080)
+    print("Server started")
