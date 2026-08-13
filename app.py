@@ -61,118 +61,10 @@ COMMON_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
 }
 
-# ===== ФУНКЦИИ КОНВЕРТАЦИИ (несколько сервисов) =====
-
-def convert_via_y2mate(url):
-    """Конвертирует через y2mate.com"""
-    logging.info("🔄 Пытаемся y2mate...")
-    try:
-        video_id = re.search(r'v=([^&]+)', url)
-        if not video_id:
-            return None
-        
-        video_id = video_id.group(1)
-        session = requests.Session()
-        session.headers.update(COMMON_HEADERS)
-        
-        if PROXY:
-            session.proxies = {'http': PROXY, 'https': PROXY}
-        
-        # Первый запрос для получения info
-        resp = session.post(
-            'https://www.y2mate.com/mates/analyzeV2',
-            data={
-                'url': f'https://www.youtube.com/watch?v={video_id}',
-                'vt': 'mp3320'
-            },
-            timeout=20
-        )
-        
-        result = resp.json()
-        
-        if result.get('status') == 'success':
-            try:
-                mp3_url = result['links']['mp3']['320']['url']
-                logging.info(f"✅ y2mate сработал! Ссылка: {mp3_url[:80]}...")
-                return {'link': mp3_url}
-            except (KeyError, TypeError):
-                logging.warning("y2mate: неправильный формат ответа")
-                return None
-        else:
-            logging.warning(f"y2mate: статус {result.get('status')}")
-            return None
-            
-    except Exception as e:
-        logging.warning(f"❌ y2mate ошибка: {e}")
-        return None
-
-def convert_via_snappea(url):
-    """Конвертирует через snappea.com"""
-    logging.info("🔄 Пытаемся snappea...")
-    try:
-        session = requests.Session()
-        session.headers.update(COMMON_HEADERS)
-        
-        if PROXY:
-            session.proxies = {'http': PROXY, 'https': PROXY}
-        
-        resp = session.get(
-            'https://snappea.com/download',
-            params={
-                'url': url,
-                'type': 'youtube',
-                'format': 'mp3'
-            },
-            timeout=20
-        )
-        
-        data = resp.json()
-        
-        if data.get('success') and data.get('url'):
-            logging.info(f"✅ snappea сработал! Ссылка: {data['url'][:80]}...")
-            return {'link': data['url']}
-        else:
-            logging.warning(f"snappea: {data.get('message', 'unknown error')}")
-            return None
-            
-    except Exception as e:
-        logging.warning(f"❌ snappea ошибка: {e}")
-        return None
-
-def convert_via_mp3_youtube(url):
-    """Конвертирует через mp3-youtube.download"""
-    logging.info("🔄 Пытаемся mp3-youtube...")
-    try:
-        session = requests.Session()
-        session.headers.update(COMMON_HEADERS)
-        
-        if PROXY:
-            session.proxies = {'http': PROXY, 'https': PROXY}
-        
-        resp = session.get(
-            'https://api.mp3-youtube.download/',
-            params={
-                'url': url,
-                'format': 'mp3'
-            },
-            timeout=20
-        )
-        
-        data = resp.json()
-        
-        if data.get('success') and data.get('url'):
-            logging.info(f"✅ mp3-youtube сработал! Ссылка: {data['url'][:80]}...")
-            return {'link': data['url']}
-        else:
-            logging.warning(f"mp3-youtube: {data.get('message', 'unknown error')}")
-            return None
-            
-    except Exception as e:
-        logging.warning(f"❌ mp3-youtube ошибка: {e}")
-        return None
+# ===== ФУНКЦИИ КОНВЕРТАЦИИ (рабочие сервисы) =====
 
 def convert_via_ytmp3_cc(url):
-    """Конвертирует через ytmp3.cc"""
+    """Конвертирует через ytmp3.cc - основной сервис"""
     logging.info("🔄 Пытаемся ytmp3.cc...")
     try:
         session = requests.Session()
@@ -181,31 +73,103 @@ def convert_via_ytmp3_cc(url):
         if PROXY:
             session.proxies = {'http': PROXY, 'https': PROXY}
         
-        # Получаем video ID
+        # Используем API ytmp3.cc
+        resp = session.get(
+            'https://ytmp3.cc/api/download',
+            params={'url': url},
+            timeout=30
+        )
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            
+            if data.get('success') and data.get('download_url'):
+                mp3_url = data['download_url']
+                logging.info(f"✅ ytmp3.cc сработал! Ссылка: {mp3_url[:80]}...")
+                return {'link': mp3_url}
+            else:
+                logging.warning(f"ytmp3.cc: {data.get('message', 'unknown error')}")
+                return None
+        else:
+            logging.warning(f"ytmp3.cc: статус {resp.status_code}")
+            return None
+            
+    except Exception as e:
+        logging.warning(f"❌ ytmp3.cc ошибка: {e}")
+        return None
+
+def convert_via_ytmp3_cc_alt(url):
+    """Альтернативный способ через ytmp3.cc"""
+    logging.info("🔄 Пытаемся ytmp3.cc (способ 2)...")
+    try:
+        session = requests.Session()
+        session.headers.update(COMMON_HEADERS)
+        
+        if PROXY:
+            session.proxies = {'http': PROXY, 'https': PROXY}
+        
+        # Парсим video ID
         video_id = re.search(r'v=([^&]+)', url)
         if not video_id:
             return None
         
         video_id = video_id.group(1)
         
-        # Запрашиваем ссылку
+        # Пытаемся через другой эндпоинт
         resp = session.get(
-            f'https://api.ytmp3.cc/api/v1/convert',
-            params={'url': url},
-            timeout=20
+            f'https://ytmp3.cc/download/{video_id}',
+            timeout=30,
+            allow_redirects=True
         )
         
-        data = resp.json()
+        if resp.status_code == 200:
+            # Проверяем, что это MP3
+            if 'audio' in resp.headers.get('content-type', ''):
+                # Это прямая ссылка на MP3
+                logging.info(f"✅ ytmp3.cc (способ 2) сработал!")
+                return {'link': resp.url}
         
-        if data.get('success') and data.get('download_url'):
-            logging.info(f"✅ ytmp3.cc сработал! Ссылка: {data['download_url'][:80]}...")
-            return {'link': data['download_url']}
-        else:
-            logging.warning(f"ytmp3.cc: {data.get('message', 'unknown error')}")
-            return None
+        return None
             
     except Exception as e:
-        logging.warning(f"❌ ytmp3.cc ошибка: {e}")
+        logging.warning(f"❌ ytmp3.cc (способ 2) ошибка: {e}")
+        return None
+
+def convert_via_cloudconvert_indirect(url):
+    """Пытаемся через публичные API сервисы"""
+    logging.info("🔄 Пытаемся через альтернативный сервис...")
+    try:
+        session = requests.Session()
+        session.headers.update(COMMON_HEADERS)
+        
+        if PROXY:
+            session.proxies = {'http': PROXY, 'https': PROXY}
+        
+        # Пытаемся несколько публичных API
+        endpoints = [
+            'https://api.audd.io/convert',
+            'https://api-v2.soundtrap.com/convert',
+        ]
+        
+        for endpoint in endpoints:
+            try:
+                resp = session.post(
+                    endpoint,
+                    json={'url': url, 'format': 'mp3'},
+                    timeout=20
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('success') and data.get('url'):
+                        logging.info(f"✅ Альтернативный сервис сработал!")
+                        return {'link': data['url']}
+            except:
+                continue
+        
+        return None
+            
+    except Exception as e:
+        logging.warning(f"❌ Альтернативный сервис ошибка: {e}")
         return None
 
 def process_download(url):
@@ -213,15 +177,16 @@ def process_download(url):
     logging.info(f"Получен URL: {url}")
     
     # Список сервисов для попытки (в порядке приоритета)
+    # Используем только те, которые доступны из России!
     services = [
-        {'name': 'y2mate', 'func': convert_via_y2mate},
-        {'name': 'snappea', 'func': convert_via_snappea},
-        {'name': 'mp3-youtube', 'func': convert_via_mp3_youtube},
-        {'name': 'ytmp3.cc', 'func': convert_via_ytmp3_cc},
+        {'name': 'ytmp3.cc (основной)', 'func': convert_via_ytmp3_cc},
+        {'name': 'ytmp3.cc (способ 2)', 'func': convert_via_ytmp3_cc_alt},
+        {'name': 'Альтернативные API', 'func': convert_via_cloudconvert_indirect},
     ]
     
     for service in services:
         try:
+            logging.info(f"Пытаемся {service['name']}...")
             result = service['func'](url)
             
             if result and 'link' in result and result['link']:
@@ -229,7 +194,7 @@ def process_download(url):
                 return result
             else:
                 logging.info(f"⏭️  {service['name']} не сработал, пробуем следующий...")
-                time.sleep(1)  # Небольшая пауза между попытками
+                time.sleep(1)
                 continue
                 
         except Exception as e:
@@ -238,7 +203,7 @@ def process_download(url):
             continue
     
     logging.error("❌ Все сервисы конвертации исчерпаны")
-    return {'error': 'All conversion services failed. Please try again later.'}
+    return {'error': 'Conversion failed. Service unavailable. Try again later.'}
 
 # ===== ДИАГНОСТИЧЕСКИЙ ЭНДПОИНТ =====
 @app.route('/diagnostic', methods=['GET'])
@@ -249,10 +214,8 @@ def diagnostic():
     services_to_check = [
         ('google.com', 'https://www.google.com'),
         ('youtube.com', 'https://www.youtube.com'),
-        ('y2mate.com', 'https://www.y2mate.com'),
-        ('snappea.com', 'https://snappea.com'),
-        ('mp3-youtube.download', 'https://api.mp3-youtube.download'),
         ('ytmp3.cc', 'https://ytmp3.cc'),
+        ('ytmp3.cc API', 'https://ytmp3.cc/api/download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ'),
     ]
     
     for name, url in services_to_check:
