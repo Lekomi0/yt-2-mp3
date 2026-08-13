@@ -675,58 +675,63 @@ function delayWithJitter(baseMs = 4000, jitterMs = 2000) {
 // ---------- Вариант 1: СКАЧАТЬ ZIP ----------
 // Собирается полностью на клиенте, сервер вообще не нужен на этом шаге.
 async function downloadAsZip(tracks, onProgress) {
-  const links = await getDirectLinks(tracks);
-  const zip = new JSZip();
- 
-  for (let i = 0; i < links.length; i++) {
-    const { title, url } = links[i];
-    onProgress?.(`Скачивание ${i + 1}/${links.length}: ${title}`);
-    const blob = await fetchMp3Blob(url);
-    const safeTitle = title.replace(/[\\/*?:"<>|]/g, '');
-    zip.file(`${String(i + 1).padStart(2, '0')} - ${safeTitle}.mp3`, blob);
-    if (i < links.length - 1) await delayWithJitter();
+  onProgress?.('⏳ Сервер скачивает треки по стабильному TCP и собирает ZIP...');
+  
+  try {
+    const resp = await fetch(`${API_BASE}/zip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tracks })
+    });
+    
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      throw new Error(errData.error || `Статус сервера: ${resp.status}`);
+    }
+    
+    const zipBlob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(zipBlob);
+    a.download = 'playlist.zip';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (err) {
+    alert('Ошибка при сборке ZIP: ' + err.message);
+    throw err;
   }
- 
-  onProgress?.('Упаковка в ZIP...');
-  const zipBlob = await zip.generateAsync({ type: 'blob' });
- 
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(zipBlob);
-  a.download = 'playlist.zip';
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
  
+
 // ---------- Вариант 2: ОБЪЕДИНИТЬ В ОДИН MP3 ----------
 // Файлы качаются в браузере, но склейка (ffmpeg) остаётся на сервере —
 // поэтому байты нужно загрузить обратно на /merge-upload.
 async function downloadAndMerge(tracks, onProgress) {
-  const links = await getDirectLinks(tracks);
- 
-  const formData = new FormData();
-  for (let i = 0; i < links.length; i++) {
-    const { title, url } = links[i];
-    onProgress?.(`Скачивание ${i + 1}/${links.length}: ${title}`);
-    const blob = await fetchMp3Blob(url);
-    // Порядок добавления в FormData сохраняется — сервер склеит именно в этом порядке
-    formData.append('files', blob, `${i}.mp3`);
-    if (i < links.length - 1) await delayWithJitter();
+  onProgress?.('⏳ Сервер выкачивает треки и склеивает через FFmpeg...');
+  
+  try {
+    const resp = await fetch(`${API_BASE}/merge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tracks })
+    });
+    
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      throw new Error(errData.error || `Статус сервера: ${resp.status}`);
+    }
+    
+    const mergedBlob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(mergedBlob);
+    a.download = 'merged.mp3';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (err) {
+    alert('Ошибка при склейке MP3: ' + err.message);
+    throw err;
   }
- 
-  onProgress?.('Отправка на сервер для склейки...');
-  const resp = await fetch(`${API_BASE}/merge-upload`, {
-    method: 'POST',
-    body: formData
-  });
-  if (!resp.ok) throw new Error('Ошибка склейки на сервере');
- 
-  const mergedBlob = await resp.blob();
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(mergedBlob);
-  a.download = 'merged.mp3';
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
+ 
     // Возвращает только те треки, у которых чекбокс отмечен
     function getSelectedTracks() {
         const checkboxes = document.querySelectorAll('.track-checkbox');
