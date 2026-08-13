@@ -630,11 +630,15 @@ async function fetchMp3Blob(url, retries = 4) {
     try {
       return await new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('GET', url, true);
-        xhr.responseType = 'blob';
         
-        // Убрали setRequestHeader('Cache-Control') и ('Pragma'),
-        // чтобы провайдер медиа-файлов не ругался на CORS.
+        // Модифицируем URL для каждой попытки (Cache-Buster). 
+        // Это заставляет Chrome открывать ЧИСТОЕ новое TCP-соединение, 
+        // полностью игнорируя упавший кэш QUIC и ошибку 206!
+        const separator = url.includes('?') ? '&' : '?';
+        const cleanUrl = `${url}${separator}retry_attempt=${attempt}_${Date.now()}`;
+        
+        xhr.open('GET', cleanUrl, true);
+        xhr.responseType = 'blob';
         
         xhr.onload = () => {
           if (xhr.status >= 200 && xhr.status < 300) {
@@ -650,21 +654,21 @@ async function fetchMp3Blob(url, retries = 4) {
     } catch (err) {
       if (attempt === retries) throw err;
       
-      // Экспоненциальная задержка перед повтором: 3с, 6с, 12с...
-      const delay = 3000 * Math.pow(2, attempt - 1);
-      console.warn(`Попытка ${attempt} не удалась (${err.message}), повтор через ${delay}мс`);
+      // Если сервер сбросил соединение, делаем БОЛЬШУЮ паузу перед повтором.
+      // На 1-й ошибке ждем 4 секунды, на 2-й — 8 секунд, на 3-й — 16 секунд.
+      // Это даст анти-флуд системе стороннего VPS остыть.
+      const delay = 4000 * Math.pow(2, attempt - 1);
+      console.warn(`Попытка ${attempt} не удалась (${err.message}), остужаем сервер, повтор через ${delay}мс`);
       await new Promise(res => setTimeout(res, delay));
     }
   }
 }
 
-// Пауза между треками — с небольшим случайным разбросом, чтобы не выглядеть
-// как бот с идеально ровным интервалом. Без этого сервер режет соединения
-// после ~5-10 запросов подряд.
+// Увеличиваем базовую паузу между РАЗНЫМИ треками, чтобы не триггерить защиту на 10+ файлах
 function sleep(ms) {
   return new Promise(res => setTimeout(res, ms));
 }
-function delayWithJitter(baseMs = 2500, jitterMs = 1000) {
+function delayWithJitter(baseMs = 4000, jitterMs = 2000) {
   return sleep(baseMs + Math.random() * jitterMs);
 }
  
