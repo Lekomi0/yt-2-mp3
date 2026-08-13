@@ -443,33 +443,36 @@
             return;
         }
 
-        resultDiv.innerHTML = '<span class="link loading">⏳ скачиваем трек...</span>';
         trackListDiv.style.display = 'none';
         trackListDiv.innerHTML = '';
 
         try {
             const urlParams = new URLSearchParams(new URL(url).search);
             let videoId = urlParams.get('v');
-            if (!videoId) {
-                resultDiv.innerHTML = '<span class="link">⚠️ не удалось определить трек для скачивания</span>';
-                return;
-            }
 
-            const downloadUrl = `${API_BASE}/download?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`;
-            const downloadResp = await fetch(downloadUrl);
-            const downloadData = await downloadResp.json();
+            if (videoId) {
+                // Есть конкретный трек — сначала быстро показываем ссылку на него
+                resultDiv.innerHTML = '<span class="link loading">⏳ скачиваем трек...</span>';
+                const downloadUrl = `${API_BASE}/download?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`;
+                const downloadResp = await fetch(downloadUrl);
+                const downloadData = await downloadResp.json();
 
-            if (downloadData.link) {
-                resultDiv.innerHTML = `
-                    <span class="link">✅ <a href="${downloadData.link}" target="_blank">${downloadData.link}</a></span>
-                    <button class="copy-btn" onclick="copyLink('${downloadData.link}')">копировать</button>
-                `;
+                if (downloadData.link) {
+                    resultDiv.innerHTML = `
+                        <span class="link">✅ <a href="${downloadData.link}" target="_blank">${downloadData.link}</a></span>
+                        <button class="copy-btn" onclick="copyLink('${downloadData.link}')">копировать</button>
+                    `;
+                } else {
+                    resultDiv.innerHTML = '<span class="link">❌ ошибка при скачивании трека: ' + (downloadData.error || 'неизвестная проблема') + '</span>';
+                    return;
+                }
+
+                resultDiv.innerHTML += '<br><span class="link loading">⏳ загружаем плейлист...</span>';
             } else {
-                resultDiv.innerHTML = '<span class="link">❌ ошибка при скачивании трека: ' + (downloadData.error || 'неизвестная проблема') + '</span>';
-                return;
+                // Чистая ссылка на плейлист без конкретного видео — сразу грузим список треков
+                resultDiv.innerHTML = '<span class="link loading">⏳ загружаем плейлист...</span>';
             }
 
-            resultDiv.innerHTML += '<br><span class="link loading">⏳ загружаем плейлист...</span>';
             const encodedUrl = encodeURIComponent(url);
             const playlistResp = await fetch(`${API_BASE}/playlist?url=${encodedUrl}`);
             const playlistData = await playlistResp.json();
@@ -704,17 +707,30 @@ async function downloadAndMerge(tracks, onProgress) {
   a.click();
   URL.revokeObjectURL(a.href);
 }
+    // Возвращает только те треки, у которых чекбокс отмечен
+    function getSelectedTracks() {
+        const checkboxes = document.querySelectorAll('.track-checkbox');
+        const selected = [];
+        checkboxes.forEach(cb => {
+            if (cb.checked) {
+                selected.push(currentTracks[parseInt(cb.dataset.index, 10)]);
+            }
+        });
+        return selected;
+    }
+
     // ===== НОВЫЕ ОБРАБОТЧИКИ КНОПОК =====
     async function downloadZip() {
         const btn = document.getElementById('zipBtn');
-        if (!currentTracks || currentTracks.length === 0) {
-            alert('Нет треков для скачивания');
+        const selected = getSelectedTracks();
+        if (!selected || selected.length === 0) {
+            alert('Нет выбранных треков для скачивания');
             return;
         }
         btn.disabled = true;
         btn.textContent = '⏳';
         try {
-            await downloadAsZip(currentTracks, (msg) => {
+            await downloadAsZip(selected, (msg) => {
                 console.log(msg);
                 // Можно обновлять статус на кнопке
                 btn.textContent = msg;
@@ -729,14 +745,15 @@ async function downloadAndMerge(tracks, onProgress) {
 
     async function downloadMerge() {
         const btn = document.getElementById('mergeBtn');
-        if (!currentTracks || currentTracks.length === 0) {
-            alert('Нет треков для объединения');
+        const selected = getSelectedTracks();
+        if (!selected || selected.length === 0) {
+            alert('Нет выбранных треков для объединения');
             return;
         }
         btn.disabled = true;
         btn.textContent = '⏳';
         try {
-            await downloadAndMerge(currentTracks, (msg) => {
+            await downloadAndMerge(selected, (msg) => {
                 console.log(msg);
                 btn.textContent = msg;
             });
