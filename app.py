@@ -240,6 +240,49 @@ def process_download(url):
     logging.error("❌ Все сервисы конвертации исчерпаны")
     return {'error': 'All conversion services failed. Please try again later.'}
 
+# ===== ДИАГНОСТИЧЕСКИЙ ЭНДПОИНТ =====
+@app.route('/diagnostic', methods=['GET'])
+def diagnostic():
+    """Проверяет доступность сервисов конвертации"""
+    results = {}
+    
+    services_to_check = [
+        ('google.com', 'https://www.google.com'),
+        ('youtube.com', 'https://www.youtube.com'),
+        ('y2mate.com', 'https://www.y2mate.com'),
+        ('snappea.com', 'https://snappea.com'),
+        ('mp3-youtube.download', 'https://api.mp3-youtube.download'),
+        ('ytmp3.cc', 'https://ytmp3.cc'),
+    ]
+    
+    for name, url in services_to_check:
+        try:
+            resp = requests.get(url, timeout=10)
+            results[name] = {
+                'status': 'OK',
+                'code': resp.status_code,
+                'accessible': True
+            }
+        except requests.exceptions.ConnectionError as e:
+            results[name] = {
+                'status': 'CONNECTION_ERROR',
+                'error': str(e)[:100],
+                'accessible': False
+            }
+        except requests.exceptions.Timeout:
+            results[name] = {
+                'status': 'TIMEOUT',
+                'accessible': False
+            }
+        except Exception as e:
+            results[name] = {
+                'status': 'ERROR',
+                'error': str(e)[:100],
+                'accessible': False
+            }
+    
+    return jsonify(results)
+
 # ===== ЭНДПОИНТ /download =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
