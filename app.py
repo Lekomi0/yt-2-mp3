@@ -16,7 +16,7 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ===== ПРОКСИ (если задан в переменной окружения) =====
+# ===== ПРОКСИ (если задан в переменной окружении) =====
 PROXY = os.getenv('PROXY', None)
 if PROXY:
     logging.info(f"Будет использован прокси: {PROXY[:20]}...")
@@ -61,11 +61,11 @@ COMMON_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
 }
 
-# ===== ФУНКЦИИ КОНВЕРТАЦИИ (рабочие сервисы) =====
+# ===== ФУНКЦИИ КОНВЕРТАЦИИ =====
 
-def convert_via_ytmp3_cc(url):
-    """Конвертирует через ytmp3.cc - основной сервис"""
-    logging.info("🔄 Пытаемся ytmp3.cc...")
+def convert_via_savefrom(url):
+    """Конвертирует через savefrom.net API"""
+    logging.info("🔄 Пытаемся savefrom.net...")
     try:
         session = requests.Session()
         session.headers.update(COMMON_HEADERS)
@@ -73,34 +73,27 @@ def convert_via_ytmp3_cc(url):
         if PROXY:
             session.proxies = {'http': PROXY, 'https': PROXY}
         
-        # Используем API ytmp3.cc
+        # API savefrom
         resp = session.get(
-            'https://ytmp3.cc/api/download',
-            params={'url': url},
+            'https://savefrom.net/api/savevideomp3',
+            params={'url': url, 'format': 'mp3'},
             timeout=30
         )
         
         if resp.status_code == 200:
             data = resp.json()
-            
-            if data.get('success') and data.get('download_url'):
-                mp3_url = data['download_url']
-                logging.info(f"✅ ytmp3.cc сработал! Ссылка: {mp3_url[:80]}...")
-                return {'link': mp3_url}
-            else:
-                logging.warning(f"ytmp3.cc: {data.get('message', 'unknown error')}")
-                return None
-        else:
-            logging.warning(f"ytmp3.cc: статус {resp.status_code}")
-            return None
-            
+            if data.get('success') and data.get('url'):
+                logging.info(f"✅ savefrom.net сработал!")
+                return {'link': data['url']}
+        
+        return None
     except Exception as e:
-        logging.warning(f"❌ ytmp3.cc ошибка: {e}")
+        logging.warning(f"❌ savefrom.net ошибка: {e}")
         return None
 
-def convert_via_ytmp3_cc_alt(url):
-    """Альтернативный способ через ytmp3.cc"""
-    logging.info("🔄 Пытаемся ytmp3.cc (способ 2)...")
+def convert_via_320youtube(url):
+    """Конвертирует через 320youtube.com"""
+    logging.info("🔄 Пытаемся 320youtube...")
     try:
         session = requests.Session()
         session.headers.update(COMMON_HEADERS)
@@ -108,36 +101,33 @@ def convert_via_ytmp3_cc_alt(url):
         if PROXY:
             session.proxies = {'http': PROXY, 'https': PROXY}
         
-        # Парсим video ID
         video_id = re.search(r'v=([^&]+)', url)
         if not video_id:
             return None
         
         video_id = video_id.group(1)
         
-        # Пытаемся через другой эндпоинт
-        resp = session.get(
-            f'https://ytmp3.cc/download/{video_id}',
-            timeout=30,
-            allow_redirects=True
+        # API 320youtube
+        resp = session.post(
+            'https://320youtube.com/api/convert',
+            json={'videoId': video_id, 'format': 'mp3'},
+            timeout=30
         )
         
         if resp.status_code == 200:
-            # Проверяем, что это MP3
-            if 'audio' in resp.headers.get('content-type', ''):
-                # Это прямая ссылка на MP3
-                logging.info(f"✅ ytmp3.cc (способ 2) сработал!")
-                return {'link': resp.url}
+            data = resp.json()
+            if data.get('success') and data.get('downloadUrl'):
+                logging.info(f"✅ 320youtube сработал!")
+                return {'link': data['downloadUrl']}
         
         return None
-            
     except Exception as e:
-        logging.warning(f"❌ ytmp3.cc (способ 2) ошибка: {e}")
+        logging.warning(f"❌ 320youtube ошибка: {e}")
         return None
 
-def convert_via_cloudconvert_indirect(url):
-    """Пытаемся через публичные API сервисы"""
-    logging.info("🔄 Пытаемся через альтернативный сервис...")
+def convert_via_notube(url):
+    """Конвертирует через notube.to"""
+    logging.info("🔄 Пытаемся notube.to...")
     try:
         session = requests.Session()
         session.headers.update(COMMON_HEADERS)
@@ -145,31 +135,134 @@ def convert_via_cloudconvert_indirect(url):
         if PROXY:
             session.proxies = {'http': PROXY, 'https': PROXY}
         
-        # Пытаемся несколько публичных API
-        endpoints = [
-            'https://api.audd.io/convert',
-            'https://api-v2.soundtrap.com/convert',
-        ]
+        # Парсим видео ID
+        video_id = re.search(r'v=([^&]+)', url)
+        if not video_id:
+            return None
         
-        for endpoint in endpoints:
-            try:
-                resp = session.post(
-                    endpoint,
-                    json={'url': url, 'format': 'mp3'},
-                    timeout=20
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get('success') and data.get('url'):
-                        logging.info(f"✅ Альтернативный сервис сработал!")
-                        return {'link': data['url']}
-            except:
-                continue
+        video_id = video_id.group(1)
+        
+        # notube API
+        resp = session.get(
+            f'https://notube.to/api/download',
+            params={'videoId': video_id, 'format': 'mp3'},
+            timeout=30
+        )
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('url'):
+                logging.info(f"✅ notube.to сработал!")
+                return {'link': data['url']}
         
         return None
-            
     except Exception as e:
-        logging.warning(f"❌ Альтернативный сервис ошибка: {e}")
+        logging.warning(f"❌ notube.to ошибка: {e}")
+        return None
+
+def convert_via_tubidy(url):
+    """Конвертирует через tubidy.me"""
+    logging.info("🔄 Пытаемся tubidy.me...")
+    try:
+        session = requests.Session()
+        session.headers.update(COMMON_HEADERS)
+        
+        if PROXY:
+            session.proxies = {'http': PROXY, 'https': PROXY}
+        
+        video_id = re.search(r'v=([^&]+)', url)
+        if not video_id:
+            return None
+        
+        video_id = video_id.group(1)
+        
+        # Парсим страницу tubidy
+        resp = session.post(
+            'https://tubidy.me/api/download',
+            data={
+                'url': f'https://www.youtube.com/watch?v={video_id}',
+                'format': 'mp3'
+            },
+            timeout=30
+        )
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('downloadUrl'):
+                logging.info(f"✅ tubidy.me сработал!")
+                return {'link': data['downloadUrl']}
+        
+        return None
+    except Exception as e:
+        logging.warning(f"❌ tubidy.me ошибка: {e}")
+        return None
+
+def convert_via_loader(url):
+    """Конвертирует через loader.to"""
+    logging.info("🔄 Пытаемся loader.to...")
+    try:
+        session = requests.Session()
+        session.headers.update(COMMON_HEADERS)
+        
+        if PROXY:
+            session.proxies = {'http': PROXY, 'https': PROXY}
+        
+        # API loader.to
+        resp = session.get(
+            'https://loader.to/api/button',
+            params={
+                'url': url,
+                'f': 'mp3'
+            },
+            timeout=30
+        )
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('url'):
+                logging.info(f"✅ loader.to сработал!")
+                return {'link': data['url']}
+        
+        return None
+    except Exception as e:
+        logging.warning(f"❌ loader.to ошибка: {e}")
+        return None
+
+def convert_via_dirpy(url):
+    """Конвертирует через dirpy.com"""
+    logging.info("🔄 Пытаемся dirpy.com...")
+    try:
+        session = requests.Session()
+        session.headers.update(COMMON_HEADERS)
+        
+        if PROXY:
+            session.proxies = {'http': PROXY, 'https': PROXY}
+        
+        video_id = re.search(r'v=([^&]+)', url)
+        if not video_id:
+            return None
+        
+        video_id = video_id.group(1)
+        
+        # API dirpy
+        resp = session.post(
+            'https://dirpy.com/api/download',
+            json={
+                'videoId': video_id,
+                'quality': 'mp3'
+            },
+            timeout=30
+        )
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('success') and data.get('url'):
+                logging.info(f"✅ dirpy.com сработал!")
+                return {'link': data['url']}
+        
+        return None
+    except Exception as e:
+        logging.warning(f"❌ dirpy.com ошибка: {e}")
         return None
 
 def process_download(url):
@@ -177,11 +270,13 @@ def process_download(url):
     logging.info(f"Получен URL: {url}")
     
     # Список сервисов для попытки (в порядке приоритета)
-    # Используем только те, которые доступны из России!
     services = [
-        {'name': 'ytmp3.cc (основной)', 'func': convert_via_ytmp3_cc},
-        {'name': 'ytmp3.cc (способ 2)', 'func': convert_via_ytmp3_cc_alt},
-        {'name': 'Альтернативные API', 'func': convert_via_cloudconvert_indirect},
+        {'name': 'savefrom.net', 'func': convert_via_savefrom},
+        {'name': '320youtube', 'func': convert_via_320youtube},
+        {'name': 'notube.to', 'func': convert_via_notube},
+        {'name': 'tubidy.me', 'func': convert_via_tubidy},
+        {'name': 'loader.to', 'func': convert_via_loader},
+        {'name': 'dirpy.com', 'func': convert_via_dirpy},
     ]
     
     for service in services:
@@ -190,10 +285,10 @@ def process_download(url):
             result = service['func'](url)
             
             if result and 'link' in result and result['link']:
-                logging.info(f"✅ Сервис {service['name']} успешно получил ссылку")
+                logging.info(f"✅ {service['name']} успешно получил ссылку")
                 return result
             else:
-                logging.info(f"⏭️  {service['name']} не сработал, пробуем следующий...")
+                logging.info(f"⏭️  {service['name']} не сработал")
                 time.sleep(1)
                 continue
                 
@@ -203,7 +298,7 @@ def process_download(url):
             continue
     
     logging.error("❌ Все сервисы конвертации исчерпаны")
-    return {'error': 'Conversion failed. Service unavailable. Try again later.'}
+    return {'error': 'Conversion failed. No service available.'}
 
 # ===== ДИАГНОСТИЧЕСКИЙ ЭНДПОИНТ =====
 @app.route('/diagnostic', methods=['GET'])
@@ -213,9 +308,12 @@ def diagnostic():
     
     services_to_check = [
         ('google.com', 'https://www.google.com'),
-        ('youtube.com', 'https://www.youtube.com'),
-        ('ytmp3.cc', 'https://ytmp3.cc'),
-        ('ytmp3.cc API', 'https://ytmp3.cc/api/download?url=https://www.youtube.com/watch?v=dQw4w9WgXcQ'),
+        ('savefrom.net', 'https://savefrom.net'),
+        ('320youtube', 'https://320youtube.com'),
+        ('notube.to', 'https://notube.to'),
+        ('tubidy.me', 'https://tubidy.me'),
+        ('loader.to', 'https://loader.to'),
+        ('dirpy.com', 'https://dirpy.com'),
     ]
     
     for name, url in services_to_check:
