@@ -296,18 +296,15 @@ def zip_tracks():
     if not mp3_urls:
         return jsonify({'error': 'No MP3 links obtained'}), 500
 
+       # Качаем строго в один поток с паузой, чтобы обойти защиту донора от флуда
     downloaded = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = []
-        for idx, title, url, sess in mp3_urls:
-            time.sleep(0.5)
-            futures.append((idx, title, executor.submit(download_mp3, url, title, 180, sess)))
-        for idx, title, future in futures:
-            data = future.result()
-            if data is None:
-                logging.warning(f"Не удалось скачать {title}")
-                continue
-            downloaded.append((idx, title, data))
+    for idx, title, url, sess in mp3_urls:
+        time.sleep(2.5)  # Даем серверу-донору перевести дыхание
+        data = download_mp3(url, title, timeout=60, session=sess)
+        if data is None:
+            logging.warning(f"Не удалось скачать {title}")
+            continue
+        downloaded.append((idx, title, data))
 
     if not downloaded:
         return jsonify({'error': 'No MP3 files downloaded'}), 500
@@ -399,18 +396,16 @@ def merge_tracks():
     if not mp3_urls:
         return jsonify({'error': 'No MP3 links obtained'}), 500
 
+        # Последовательное скачивание треков для последующей склейки
     downloaded = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = []
-        for idx, title, url, sess in mp3_urls:
-            time.sleep(0.5)
-            futures.append((idx, title, executor.submit(download_mp3, url, title, 180, sess)))
-        for idx, title, future in futures:
-            data = future.result()
-            if data is None:
-                logging.warning(f"Не удалось скачать {title}")
-                continue
-            downloaded.append((idx, title, data))
+    for idx, title, url, sess in mp3_urls:
+        time.sleep(2.5)  # Безопасная пауза 2.5 секунды
+        data = download_mp3(url, title, timeout=60, session=sess)
+        if data is None:
+            logging.warning(f"Не удалось скачать {title}")
+            continue
+        downloaded.append((idx, title, data))
+
 
     if not downloaded:
         return jsonify({'error': 'No MP3 files downloaded'}), 500
