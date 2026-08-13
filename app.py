@@ -11,14 +11,12 @@ import tempfile
 import subprocess
 from requests.exceptions import ConnectionError
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from bs4 import BeautifulSoup
-import json
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ===== ПРОКСИ (если задан в переменной окружении) =====
+# ===== ПРОКСИ (если задан в переменной окружения) =====
 PROXY = os.getenv('PROXY', None)
 if PROXY:
     logging.info(f"Будет использован прокси: {PROXY[:20]}...")
@@ -34,13 +32,13 @@ for item in raw_keys:
     else:
         API_KEYS.append((len(API_KEYS)+1, item))
 
-if not API_KEYS or not API_KEYS[0][1]:
-    logging.warning("⚠️ No API keys configured - playlist feature disabled")
+if not API_KEYS:
+    logging.error("No API keys configured!")
+    raise SystemExit("No API keys configured")
 
 logging.info(f"Загружено {len(API_KEYS)} API ключей:")
 for num, key in API_KEYS:
-    if key:
-        logging.info(f"  Ключ {num}: {key[:10]}...")
+    logging.info(f"  Ключ {num}: {key[:10]}...")
 
 current_index = 0
 switch_count = 0
@@ -60,251 +58,81 @@ def switch_to_next_key():
 
 # ===== ОБЩИЕ ЗАГОЛОВКИ =====
 COMMON_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'origin': 'https://media.ytmp3.gg',
+    'referer': 'https://media.ytmp3.gg/',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
 }
 
-# ===== ФУНКЦИИ КОНВЕРТАЦИИ =====
-
-def convert_via_savefrom_scrape(url):
-    """Конвертирует через savefrom.net парсингом"""
-    logging.info("🔄 Пытаемся savefrom.net (парсинг)...")
-    try:
-        session = requests.Session()
-        session.headers.update(COMMON_HEADERS)
-        
-        if PROXY:
-            session.proxies = {'http': PROXY, 'https': PROXY}
-        
-        # Параметры для savefrom
-        params = {
-            'url': url,
-            'lang': 'en'
-        }
-        
-        # Делаем POST запрос на савфром
-        resp = session.post(
-            'https://savefrom.net/save',
-            data=params,
-            timeout=30,
-            allow_redirects=True
-        )
-        
-        if resp.status_code == 200:
-            # Парсим HTML в поисках ссылки на скачивание
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            
-            # Ищем ссылку на MP3
-            mp3_link = None
-            
-            # Вариант 1: ищем в data атрибутах
-            for link in soup.find_all('a', href=True):
-                href = link.get('href', '')
-                if 'mp3' in href.lower() or href.endswith('.mp3'):
-                    mp3_link = href
-                    break
-            
-            # Вариант 2: ищем в скриптах
-            if not mp3_link:
-                scripts = soup.find_all('script')
-                for script in scripts:
-                    if script.string:
-                        # Ищем URL в JavaScript
-                        urls = re.findall(r'https?://[^\s"\'<>]+\.mp3', script.string)
-                        if urls:
-                            mp3_link = urls[0]
-                            break
-            
-            if mp3_link:
-                logging.info(f"✅ savefrom.net сработал!")
-                return {'link': mp3_link}
-        
-        return None
-    except Exception as e:
-        logging.warning(f"❌ savefrom.net ошибка: {e}")
-        return None
-
-def convert_via_tubidy_scrape(url):
-    """Конвертирует через tubidy.me парсингом"""
-    logging.info("🔄 Пытаемся tubidy.me (парсинг)...")
-    try:
-        session = requests.Session()
-        session.headers.update(COMMON_HEADERS)
-        
-        if PROXY:
-            session.proxies = {'http': PROXY, 'https': PROXY}
-        
-        # Парсим видео ID из URL
-        video_id = re.search(r'v=([^&]+)', url)
-        if not video_id:
-            return None
-        
-        video_id = video_id.group(1)
-        
-        # Делаем запрос на tubidy
-        data = {
-            'url': url,
-            'format': 'mp3',
-            'quality': '320'
-        }
-        
-        resp = session.post(
-            'https://tubidy.me/api/v1/fetch',
-            json=data,
-            timeout=30
-        )
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            
-            # Проверяем разные ключи ответа
-            mp3_url = data.get('url') or data.get('downloadUrl') or data.get('link')
-            
-            if mp3_url:
-                logging.info(f"✅ tubidy.me сработал!")
-                return {'link': mp3_url}
-        
-        return None
-    except Exception as e:
-        logging.warning(f"❌ tubidy.me ошибка: {e}")
-        return None
-
-def convert_via_generic_parser(url):
-    """Универсальный парсер для видеоконвертеров"""
-    logging.info("🔄 Пытаемся generic parser...")
-    try:
-        session = requests.Session()
-        session.headers.update(COMMON_HEADERS)
-        
-        if PROXY:
-            session.proxies = {'http': PROXY, 'https': PROXY}
-        
-        # Пытаемся несколько популярных конвертеров
-        converters = [
-            {
-                'name': 'clipconverter',
-                'url': 'https://clipconverter.cc/',
-                'method': 'post',
-                'data_key': 'url'
-            },
-            {
-                'name': 'flvto',
-                'url': 'https://www.flvto.me/api/convert',
-                'method': 'post',
-                'data_key': 'url'
-            },
-        ]
-        
-        for converter in converters:
-            try:
-                if converter['method'] == 'post':
-                    resp = session.post(
-                        converter['url'],
-                        data={converter['data_key']: url},
-                        timeout=20
-                    )
-                else:
-                    resp = session.get(
-                        converter['url'],
-                        params={converter['data_key']: url},
-                        timeout=20
-                    )
-                
-                if resp.status_code == 200:
-                    # Парсим JSON ответ
-                    try:
-                        data = resp.json()
-                        mp3_url = data.get('url') or data.get('downloadUrl') or data.get('mp3')
-                        if mp3_url:
-                            logging.info(f"✅ {converter['name']} сработал!")
-                            return {'link': mp3_url}
-                    except:
-                        # Если JSON не парсится, ищем в HTML
-                        soup = BeautifulSoup(resp.text, 'html.parser')
-                        for link in soup.find_all('a', href=True):
-                            if '.mp3' in link.get('href', ''):
-                                logging.info(f"✅ {converter['name']} сработал (HTML)!")
-                                return {'link': link['href']}
-            except:
-                continue
-        
-        return None
-    except Exception as e:
-        logging.warning(f"❌ generic parser ошибка: {e}")
-        return None
-
+# ===== ЛОГИКА КОНВЕРТАЦИИ (с сессией) =====
 def process_download(url):
-    """Основная функция - пробует несколько сервисов конвертации"""
     logging.info(f"Получен URL: {url}")
-    
-    # Список сервисов для попытки (в порядке приоритета)
-    services = [
-        {'name': 'savefrom.net (парсинг)', 'func': convert_via_savefrom_scrape},
-        {'name': 'tubidy.me (парсинг)', 'func': convert_via_tubidy_scrape},
-        {'name': 'generic parser', 'func': convert_via_generic_parser},
+    cache_buster = int(time.time() * 1000)
+    configs = [
+        {"api": "convert1s", "bitrate": "320k", "timeout": 15, "attempts": 2, "delay": 2},
+        {"api": "convert1s", "bitrate": "128k", "timeout": 15, "attempts": 3, "delay": 2}
     ]
-    
-    for service in services:
-        try:
-            logging.info(f"Пытаемся {service['name']}...")
-            result = service['func'](url)
-            
-            if result and 'link' in result and result['link']:
-                logging.info(f"✅ {service['name']} успешно получил ссылку")
-                return result
-            else:
-                logging.info(f"⏭️  {service['name']} не сработал")
-                time.sleep(1)
-                continue
-                
-        except Exception as e:
-            logging.warning(f"❌ {service['name']} исключение: {e}")
-            time.sleep(1)
-            continue
-    
-    logging.error("❌ Все сервисы конвертации исчерпаны")
-    return {'error': 'Conversion failed. No service available.'}
 
-# ===== ДИАГНОСТИЧЕСКИЙ ЭНДПОИНТ =====
-@app.route('/diagnostic', methods=['GET'])
-def diagnostic():
-    """Проверяет доступность сервисов конвертации"""
-    results = {}
-    
-    services_to_check = [
-        ('google.com', 'https://www.google.com'),
-        ('savefrom.net', 'https://savefrom.net'),
-        ('tubidy.me', 'https://tubidy.me'),
-        ('clipconverter', 'https://clipconverter.cc'),
-        ('flvto', 'https://www.flvto.me'),
-    ]
-    
-    for name, url in services_to_check:
-        try:
-            resp = requests.get(url, timeout=10)
-            results[name] = {
-                'status': 'OK',
-                'code': resp.status_code,
-                'accessible': True
-            }
-        except requests.exceptions.ConnectionError as e:
-            results[name] = {
-                'status': 'CONNECTION_ERROR',
-                'error': str(e)[:100],
-                'accessible': False
-            }
-        except requests.exceptions.Timeout:
-            results[name] = {
-                'status': 'TIMEOUT',
-                'accessible': False
-            }
-        except Exception as e:
-            results[name] = {
-                'status': 'ERROR',
-                'error': str(e)[:100],
-                'accessible': False
-            }
-    
-    return jsonify(results)
+    for config in configs:
+        for attempt in range(config["attempts"]):
+            session = requests.Session()
+            session.headers.update(COMMON_HEADERS)
+            if PROXY:
+                session.proxies = {'http': PROXY, 'https': PROXY}
+            try:
+                if config["api"] == "convert1s":
+                    post_headers = {
+                        **COMMON_HEADERS,
+                        'accept': 'application/json',
+                        'content-type': 'application/json',
+                    }
+                    fake_url = url + f"&_={cache_buster + attempt}"
+                    payload = {
+                        "url": fake_url,
+                        "os": "windows",
+                        "output": {"type": "audio", "format": "mp3"},
+                        "audio": {"bitrate": config["bitrate"]}
+                    }
+                    resp = session.post('https://hub.convert1s.com/api/download', json=payload, headers=post_headers, timeout=config["timeout"])
+                    if resp.status_code != 200:
+                        logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: статус {resp.status_code}")
+                        time.sleep(config["delay"])
+                        continue
+                    data = resp.json()
+                    status_url = data.get('statusUrl')
+                    if not status_url:
+                        logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: нет statusUrl")
+                        time.sleep(config["delay"])
+                        continue
+
+                    for _ in range(8):
+                        time.sleep(2)
+                        try:
+                            status_resp = session.get(status_url, timeout=10)
+                            if status_resp.status_code != 200:
+                                continue
+                            status_data = status_resp.json()
+                            if 'downloadUrl' in status_data and status_data['downloadUrl']:
+                                mp3_url = status_data['downloadUrl']
+                                logging.info(f"Получена ссылка через convert1s ({config['bitrate']}) попытка {attempt+1}: {mp3_url}")
+                                return {'link': mp3_url, 'session': session}
+                            if status_data.get('status') == 'error' or status_data.get('state') == 'error':
+                                break
+                        except ConnectionError as e:
+                            logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка соединения: {e}")
+                            break
+                        except Exception as e:
+                            logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка при опросе: {e}")
+                            continue
+                    logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1} не удалась")
+                    time.sleep(config["delay"])
+                    continue
+
+            except Exception as e:
+                logging.error(f"Ошибка в конфигурации {config['api']} попытка {attempt+1}: {str(e)}")
+                time.sleep(config["delay"])
+                continue
+
+    return {'error': 'Conversion failed after all attempts'}
 
 # ===== ЭНДПОИНТ /download =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
@@ -337,10 +165,6 @@ def playlist():
         return jsonify({'error': 'Invalid playlist URL: no list parameter found'}), 400
     playlist_id = match.group(1)
     logging.info(f"Extracted playlist ID: {playlist_id}")
-
-    # Проверяем, есть ли API ключи
-    if not API_KEYS or not API_KEYS[0][1]:
-        return jsonify({'error': 'YouTube API keys not configured'}), 500
 
     max_attempts = len(API_KEYS) * 3
     attempt = 0
@@ -410,7 +234,7 @@ def playlist():
 
     return jsonify({'error': 'All API keys quota exceeded'}), 500
 
-# ===== ФУНКЦИЯ ДЛЯ СКАЧИВАНИЯ MP3 =====
+# ===== ФУНКЦИЯ ДЛЯ СКАЧИВАНИЯ MP3 (с прокси и сессией) =====
 DOWNLOAD_HEADERS = {
     'Accept': '*/*',
     'Accept-Encoding': 'identity',
@@ -672,7 +496,44 @@ def merge_from_links():
         logging.error(f"Merge from links error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# ===== ТЕСТОВЫЙ ЭНДПОИНТ (для диагностики) =====
+@app.route('/test-download', methods=['GET'])
+def test_download():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+
+    test_url = url
+
+    try:
+        resp1 = requests.get(test_url, timeout=10)
+        result1 = {'status': resp1.status_code, 'len': len(resp1.content), 'preview': resp1.text[:200]}
+    except Exception as e:
+        result1 = {'error': str(e)}
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'audio/mpeg,audio/*;q=0.9,*/*;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Referer': 'https://media.ytmp3.gg/',
+        'Origin': 'https://media.ytmp3.gg/',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+    try:
+        resp2 = requests.get(test_url, headers=headers, timeout=10)
+        result2 = {'status': resp2.status_code, 'len': len(resp2.content), 'preview': resp2.text[:200]}
+    except Exception as e:
+        result2 = {'error': str(e)}
+
+    return jsonify({
+        'without_headers': result1,
+        'with_headers': result2
+    })
+
 # ===== ЭНДПОИНТ /links (только получить ссылки, без скачивания файлов) =====
+# Использует браузер пользователя для самого скачивания — сервер отдаёт только
+# прямые mp3-ссылки, полученные через process_download().
 @app.route('/links', methods=['POST'])
 def get_links():
     data = request.get_json()
@@ -700,15 +561,18 @@ def get_links():
                 results[idx] = {'idx': idx, 'title': title, 'ok': False, 'error': result.get('error')}
                 logging.warning(f"Не удалось получить ссылку для {title}: {result.get('error')}")
 
-    ok_count = sum(1 for r in results if r and r.get('ok'))
+    ok_count = sum(1 for r in results if r['ok'])
     if ok_count == 0:
         return jsonify({'error': 'No MP3 links obtained'}), 500
 
     return jsonify({'tracks': results, 'total': len(tracks), 'ok': ok_count})
 
-# ===== ЭНДПОИНТ /zip-upload =====
+# ===== ЭНДПОИНТ /zip-upload (браузер скачал mp3 сам и грузит нам байты для упаковки) =====
 @app.route('/zip-upload', methods=['POST'])
 def zip_upload():
+    # Ожидается multipart/form-data:
+    #   files   — несколько файлов (в нужном порядке добавления)
+    #   titles  — JSON-массив названий в том же порядке (опционально)
     files = request.files.getlist('files')
     if not files:
         return jsonify({'error': 'No files uploaded'}), 400
@@ -731,9 +595,11 @@ def zip_upload():
         logging.error(f"ZIP upload error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-# ===== ЭНДПОИНТ /merge-upload =====
+# ===== ЭНДПОИНТ /merge-upload (браузер скачал mp3 сам и грузит нам байты для склейки) =====
 @app.route('/merge-upload', methods=['POST'])
 def merge_upload():
+    # Ожидается multipart/form-data:
+    #   files — несколько mp3-файлов В ПРАВИЛЬНОМ ПОРЯДКЕ склейки
     files = request.files.getlist('files')
     if not files:
         return jsonify({'error': 'No files uploaded'}), 400
