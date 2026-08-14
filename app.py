@@ -1,4 +1,3 @@
-from urllib.parse import urlparse, parse_qs
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import requests
@@ -8,20 +7,14 @@ import os
 import re
 import zipfile
 import tempfile
-import subprocess
-from requests.exceptions import ConnectionError
+import yt_dlp
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# ===== ПРОКСИ (если задан в переменной окружения) =====
-PROXY = os.getenv('PROXY', None)
-if PROXY:
-    logging.info(f"Будет использован прокси: {PROXY[:20]}...")
-
-# ===== НАСТРОЙКА РОТАЦИИ КЛЮЧЕЙ =====
+# ===== НАСТРОЙКА РОТАЦИИ КЛЮЧЕЙ YOUTUBE DATA API =====
 raw_keys = os.getenv('YOUTUBE_API_KEYS', '').split(',')
 API_KEYS = []
 for item in raw_keys:
@@ -56,85 +49,40 @@ def switch_to_next_key():
     logging.info(f"Переключились на ключ {API_KEYS[current_index][0]}")
     return True
 
-# ===== ОБЩИЕ ЗАГОЛОВКИ =====
-COMMON_HEADERS = {
-    'origin': 'https://media.ytmp3.gg',
-    'referer': 'https://media.ytmp3.gg/',
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-}
+# ===== СКАЧИВАНИЕ АУДИО ЧЕРЕЗ yt-dlp =====
+# Качает видео напрямую с YouTube и сразу конвертирует в mp3 через ffmpeg
+# (постпроцессор yt-dlp), без сторонних сервисов.
+def download_audio(video_url, output_dir, filename_base, retries=3):
+    output_template = os.path.join(output_dir, f"{filename_base}.%(ext)s")
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_template,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+        'no_warnings': True,
+        'noprogress': True,
+        'socket_timeout': 30,
+    }
 
-# ===== ЛОГИКА КОНВЕРТАЦИИ (с сессией) =====
-def process_download(url):
-    logging.info(f"Получен URL: {url}")
-    cache_buster = int(time.time() * 1000)
-    configs = [
-        {"api": "convert1s", "bitrate": "320k", "timeout": 15, "attempts": 2, "delay": 2},
-        {"api": "convert1s", "bitrate": "128k", "timeout": 15, "attempts": 3, "delay": 2}
-    ]
+    mp3_path = os.path.join(output_dir, f"{filename_base}.mp3")
 
-    for config in configs:
-        for attempt in range(config["attempts"]):
-            session = requests.Session()
-            session.headers.update(COMMON_HEADERS)
-            if PROXY:
-                session.proxies = {'http': PROXY, 'https': PROXY}
-            try:
-                if config["api"] == "convert1s":
-                    post_headers = {
-                        **COMMON_HEADERS,
-                        'accept': 'application/json',
-                        'content-type': 'application/json',
-                    }
-                    fake_url = url + f"&_={cache_buster + attempt}"
-                    payload = {
-                        "url": fake_url,
-                        "os": "windows",
-                        "output": {"type": "audio", "format": "mp3"},
-                        "audio": {"bitrate": config["bitrate"]}
-                    }
-                    resp = session.post('https://hub.convert1s.com/api/download', json=payload, headers=post_headers, timeout=config["timeout"])
-                    if resp.status_code != 200:
-                        logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: статус {resp.status_code}")
-                        time.sleep(config["delay"])
-                        continue
-                    data = resp.json()
-                    status_url = data.get('statusUrl')
-                    if not status_url:
-                        logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1}: нет statusUrl")
-                        time.sleep(config["delay"])
-                        continue
+    for attempt in range(retries):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+            if os.path.exists(mp3_path):
+                return mp3_path
+        except Exception as e:
+            logging.warning(f"yt-dlp попытка {attempt+1} для {video_url}: {e}")
+            time.sleep(2 * (attempt + 1))
 
-                    for _ in range(8):
-                        time.sleep(2)
-                        try:
-                            status_resp = session.get(status_url, timeout=10)
-                            if status_resp.status_code != 200:
-                                continue
-                            status_data = status_resp.json()
-                            if 'downloadUrl' in status_data and status_data['downloadUrl']:
-                                mp3_url = status_data['downloadUrl']
-                                logging.info(f"Получена ссылка через convert1s ({config['bitrate']}) попытка {attempt+1}: {mp3_url}")
-                                return {'link': mp3_url, 'session': session}
-                            if status_data.get('status') == 'error' or status_data.get('state') == 'error':
-                                break
-                        except ConnectionError as e:
-                            logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка соединения: {e}")
-                            break
-                        except Exception as e:
-                            logging.error(f"convert1s ({config['bitrate']}) попытка {attempt+1}: ошибка при опросе: {e}")
-                            continue
-                    logging.warning(f"convert1s ({config['bitrate']}) попытка {attempt+1} не удалась")
-                    time.sleep(config["delay"])
-                    continue
+    return None
 
-            except Exception as e:
-                logging.error(f"Ошибка в конфигурации {config['api']} попытка {attempt+1}: {str(e)}")
-                time.sleep(config["delay"])
-                continue
-
-    return {'error': 'Conversion failed after all attempts'}
-
-# ===== ЭНДПОИНТ /download =====
+# ===== ЭНДПОИНТ /download (скачать один трек — отдаёт mp3 файлом) =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
     if request.method == 'OPTIONS':
@@ -144,10 +92,11 @@ def download():
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
 
-    result = process_download(url)
-    if 'error' in result:
-        return jsonify(result), 500
-    return jsonify({'link': result['link']})
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mp3_path = download_audio(url, tmpdir, 'track')
+        if not mp3_path:
+            return jsonify({'error': 'Не удалось скачать трек'}), 500
+        return send_file(mp3_path, as_attachment=True, download_name='track.mp3')
 
 # ===== ЭНДПОИНТ /playlist =====
 @app.route('/playlist', methods=['GET'])
@@ -234,40 +183,7 @@ def playlist():
 
     return jsonify({'error': 'All API keys quota exceeded'}), 500
 
-# ===== ФУНКЦИЯ ДЛЯ СКАЧИВАНИЯ MP3 (с прокси и сессией) =====
-DOWNLOAD_HEADERS = {
-    'Accept': '*/*',
-    'Accept-Encoding': 'identity',
-    'Connection': 'keep-alive',
-    **COMMON_HEADERS,
-}
-
-def download_mp3(mp3_url, title, timeout=180, session=None):
-    client = session if session is not None else requests
-    proxies = {'http': PROXY, 'https': PROXY} if PROXY else None
-    for attempt in range(3):
-        try:
-            logging.info(f"Скачивание {title} (попытка {attempt+1})" + (f" через прокси" if PROXY else ""))
-            with client.get(mp3_url, headers=DOWNLOAD_HEADERS, proxies=proxies, stream=True, timeout=(10, timeout)) as resp:
-                if resp.status_code != 200:
-                    logging.warning(f"Статус {resp.status_code} для {title}")
-                    continue
-                chunks = []
-                total = 0
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        chunks.append(chunk)
-                        total += len(chunk)
-                        if total % (1024*1024) < 8192:
-                            logging.info(f"{title}: скачано {total // (1024*1024)} МБ")
-                logging.info(f"{title}: успешно скачан, размер {total} байт")
-                return b''.join(chunks)
-        except Exception as e:
-            logging.warning(f"Ошибка скачивания {title} (попытка {attempt+1}): {e}")
-            time.sleep(5)
-    return None
-
-# ===== ЭНДПОИНТ /zip (пониженный параллелизм) =====
+# ===== ЭНДПОИНТ /zip (скачивает все треки через yt-dlp и пакует в ZIP) =====
 @app.route('/zip', methods=['POST'])
 def zip_tracks():
     data = request.get_json()
@@ -278,101 +194,47 @@ def zip_tracks():
     if not tracks:
         return jsonify({'error': 'Empty tracks list'}), 400
 
-    mp3_urls = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_track = {
-            executor.submit(process_download, track['url']): (idx, track['title'])
-            for idx, track in enumerate(tracks)
-        }
-        for future in as_completed(future_to_track):
-            idx, title = future_to_track[future]
-            result = future.result()
-            if 'link' in result:
-                mp3_urls.append((idx, title, result['link'], result.get('session')))
-                logging.info(f"Ссылка получена для {title}")
-            else:
-                logging.warning(f"Не удалось получить ссылку для {title}: {result.get('error')}")
-
-    if not mp3_urls:
-        return jsonify({'error': 'No MP3 links obtained'}), 500
-
-    downloaded = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = []
-        for idx, title, url, sess in mp3_urls:
-            time.sleep(0.5)
-            futures.append((idx, title, executor.submit(download_mp3, url, title, 180, sess)))
-        for idx, title, future in futures:
-            data = future.result()
-            if data is None:
-                logging.warning(f"Не удалось скачать {title}")
-                continue
-            downloaded.append((idx, title, data))
-
-    if not downloaded:
-        return jsonify({'error': 'No MP3 files downloaded'}), 500
-
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
+            downloaded = [None] * len(tracks)
+
+            def job(idx, track):
+                filename_base = f"track_{idx:04d}"
+                path = download_audio(track['url'], tmpdir, filename_base)
+                return idx, track.get('title', filename_base), path
+
+            # Небольшой параллелизм — YouTube тоже может троттлить при
+            # слишком частых параллельных запросах с одного IP.
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = [executor.submit(job, idx, track) for idx, track in enumerate(tracks)]
+                for future in as_completed(futures):
+                    idx, title, path = future.result()
+                    if path:
+                        downloaded[idx] = (title, path)
+                    else:
+                        logging.warning(f"Не удалось скачать: {title}")
+
+            downloaded = [d for d in downloaded if d is not None]
+            if not downloaded:
+                return jsonify({'error': 'No MP3 files downloaded'}), 500
+
             zip_path = os.path.join(tmpdir, 'playlist.zip')
             with zipfile.ZipFile(zip_path, 'w') as zipf:
-                for idx, title, mp3_data in downloaded:
-                    filename = f"{idx+1:02d} - {title}.mp3"
+                for i, (title, path) in enumerate(downloaded):
+                    filename = f"{i+1:02d} - {title}.mp3"
                     safe_filename = re.sub(r'[\\/*?:"<>|]', '', filename)
-                    filepath = os.path.join(tmpdir, safe_filename)
-                    with open(filepath, 'wb') as f:
-                        f.write(mp3_data)
-                    zipf.write(filepath, safe_filename)
+                    zipf.write(path, safe_filename)
+
             return send_file(zip_path, as_attachment=True, download_name='playlist.zip')
     except Exception as e:
         logging.error(f"ZIP error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-# ===== ЭНДПОИНТ /zip-from-links =====
-@app.route('/zip-from-links', methods=['POST'])
-def zip_from_links():
-    data = request.get_json()
-    if not data or 'links' not in data:
-        return jsonify({'error': 'Missing links list'}), 400
-
-    links = data['links']
-    if not links:
-        return jsonify({'error': 'Empty links list'}), 400
-
-    downloaded = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = []
-        for i, link in enumerate(links):
-            time.sleep(0.5)
-            futures.append((i, executor.submit(download_mp3, link, f"track_{i+1}", 120)))
-        for i, future in futures:
-            data = future.result()
-            if data is None:
-                logging.warning(f"Не удалось скачать track_{i+1}")
-                continue
-            downloaded.append((i, data))
-
-    if not downloaded:
-        return jsonify({'error': 'No MP3 files downloaded'}), 500
-
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            zip_path = os.path.join(tmpdir, 'playlist.zip')
-            with zipfile.ZipFile(zip_path, 'w') as zipf:
-                for i, mp3_data in downloaded:
-                    filename = f"track_{i+1:02d}.mp3"
-                    filepath = os.path.join(tmpdir, filename)
-                    with open(filepath, 'wb') as f:
-                        f.write(mp3_data)
-                    zipf.write(filepath, filename)
-            return send_file(zip_path, as_attachment=True, download_name='playlist.zip')
-    except Exception as e:
-        logging.error(f"ZIP from links error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# ===== ЭНДПОИНТ /merge (пониженный параллелизм) =====
+# ===== ЭНДПОИНТ /merge (скачивает все треки через yt-dlp и склеивает через ffmpeg) =====
 @app.route('/merge', methods=['POST'])
 def merge_tracks():
+    import subprocess
+
     data = request.get_json()
     if not data or 'tracks' not in data:
         return jsonify({'error': 'Missing tracks list'}), 400
@@ -381,49 +243,27 @@ def merge_tracks():
     if not tracks:
         return jsonify({'error': 'Empty tracks list'}), 400
 
-    mp3_urls = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_track = {
-            executor.submit(process_download, track['url']): (idx, track['title'])
-            for idx, track in enumerate(tracks)
-        }
-        for future in as_completed(future_to_track):
-            idx, title = future_to_track[future]
-            result = future.result()
-            if 'link' in result:
-                mp3_urls.append((idx, title, result['link'], result.get('session')))
-                logging.info(f"Ссылка получена для {title}")
-            else:
-                logging.warning(f"Не удалось получить ссылку для {title}: {result.get('error')}")
-
-    if not mp3_urls:
-        return jsonify({'error': 'No MP3 links obtained'}), 500
-
-    downloaded = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = []
-        for idx, title, url, sess in mp3_urls:
-            time.sleep(0.5)
-            futures.append((idx, title, executor.submit(download_mp3, url, title, 180, sess)))
-        for idx, title, future in futures:
-            data = future.result()
-            if data is None:
-                logging.warning(f"Не удалось скачать {title}")
-                continue
-            downloaded.append((idx, title, data))
-
-    if not downloaded:
-        return jsonify({'error': 'No MP3 files downloaded'}), 500
-
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            mp3_files = []
-            for idx, title, mp3_data in downloaded:
-                filename = f"{idx:04d}.mp3"
-                filepath = os.path.join(tmpdir, filename)
-                with open(filepath, 'wb') as f:
-                    f.write(mp3_data)
-                mp3_files.append(filepath)
+            downloaded = [None] * len(tracks)
+
+            def job(idx, track):
+                filename_base = f"track_{idx:04d}"
+                path = download_audio(track['url'], tmpdir, filename_base)
+                return idx, path
+
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = [executor.submit(job, idx, track) for idx, track in enumerate(tracks)]
+                for future in as_completed(futures):
+                    idx, path = future.result()
+                    if path:
+                        downloaded[idx] = path
+                    else:
+                        logging.warning(f"Не удалось скачать трек #{idx}")
+
+            mp3_files = [p for p in downloaded if p is not None]
+            if not mp3_files:
+                return jsonify({'error': 'No MP3 files downloaded'}), 500
 
             list_path = os.path.join(tmpdir, 'list.txt')
             with open(list_path, 'w') as f:
@@ -441,233 +281,6 @@ def merge_tracks():
     except Exception as e:
         logging.error(f"Merge error: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
-# ===== ЭНДПОИНТ /merge-from-links =====
-@app.route('/merge-from-links', methods=['POST'])
-def merge_from_links():
-    data = request.get_json()
-    if not data or 'links' not in data:
-        return jsonify({'error': 'Missing links list'}), 400
-
-    links = data['links']
-    if not links:
-        return jsonify({'error': 'Empty links list'}), 400
-
-    downloaded = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = []
-        for i, link in enumerate(links):
-            time.sleep(0.5)
-            futures.append((i, executor.submit(download_mp3, link, f"track_{i+1}", 120)))
-        for i, future in futures:
-            data = future.result()
-            if data is None:
-                logging.warning(f"Не удалось скачать track_{i+1}")
-                continue
-            downloaded.append((i, data))
-
-    if not downloaded:
-        return jsonify({'error': 'No MP3 files downloaded'}), 500
-
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mp3_files = []
-            for i, mp3_data in downloaded:
-                filename = f"{i:04d}.mp3"
-                filepath = os.path.join(tmpdir, filename)
-                with open(filepath, 'wb') as f:
-                    f.write(mp3_data)
-                mp3_files.append(filepath)
-
-            list_path = os.path.join(tmpdir, 'list.txt')
-            with open(list_path, 'w') as f:
-                for mp3 in mp3_files:
-                    f.write(f"file '{os.path.basename(mp3)}'\n")
-
-            output_path = os.path.join(tmpdir, 'merged.mp3')
-            cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy', output_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=tmpdir, timeout=300)
-            if result.returncode != 0:
-                logging.error(f"FFmpeg error: {result.stderr}")
-                return jsonify({'error': 'FFmpeg merge failed'}), 500
-
-            return send_file(output_path, as_attachment=True, download_name='merged.mp3')
-    except Exception as e:
-        logging.error(f"Merge from links error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# ===== ТЕСТОВЫЙ ЭНДПОИНТ (для диагностики) =====
-@app.route('/test-download', methods=['GET'])
-def test_download():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'Missing url parameter'}), 400
-
-    test_url = url
-
-    try:
-        resp1 = requests.get(test_url, timeout=10)
-        result1 = {'status': resp1.status_code, 'len': len(resp1.content), 'preview': resp1.text[:200]}
-    except Exception as e:
-        result1 = {'error': str(e)}
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'audio/mpeg,audio/*;q=0.9,*/*;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Referer': 'https://media.ytmp3.gg/',
-        'Origin': 'https://media.ytmp3.gg/',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
-    }
-    try:
-        resp2 = requests.get(test_url, headers=headers, timeout=10)
-        result2 = {'status': resp2.status_code, 'len': len(resp2.content), 'preview': resp2.text[:200]}
-    except Exception as e:
-        result2 = {'error': str(e)}
-
-    return jsonify({
-        'without_headers': result1,
-        'with_headers': result2
-    })
-
-# ===== ЭНДПОИНТ /links (только получить ссылки, без скачивания файлов) =====
-# Использует браузер пользователя для самого скачивания — сервер отдаёт только
-# прямые mp3-ссылки, полученные через process_download().
-@app.route('/links', methods=['POST'])
-def get_links():
-    data = request.get_json()
-    if not data or 'tracks' not in data:
-        return jsonify({'error': 'Missing tracks list'}), 400
-
-    tracks = data['tracks']
-    if not tracks:
-        return jsonify({'error': 'Empty tracks list'}), 400
-
-    results = [None] * len(tracks)
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        future_to_idx = {
-            executor.submit(process_download, track['url']): idx
-            for idx, track in enumerate(tracks)
-        }
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            result = future.result()
-            title = tracks[idx].get('title', f'track_{idx+1}')
-            if 'link' in result:
-                results[idx] = {'idx': idx, 'title': title, 'url': result['link'], 'ok': True}
-                logging.info(f"Ссылка получена для {title}")
-            else:
-                results[idx] = {'idx': idx, 'title': title, 'ok': False, 'error': result.get('error')}
-                logging.warning(f"Не удалось получить ссылку для {title}: {result.get('error')}")
-
-    ok_count = sum(1 for r in results if r['ok'])
-    if ok_count == 0:
-        return jsonify({'error': 'No MP3 links obtained'}), 500
-
-    return jsonify({'tracks': results, 'total': len(tracks), 'ok': ok_count})
-
-# ===== ЭНДПОИНТ /zip-upload (браузер скачал mp3 сам и грузит нам байты для упаковки) =====
-@app.route('/zip-upload', methods=['POST'])
-def zip_upload():
-    # Ожидается multipart/form-data:
-    #   files   — несколько файлов (в нужном порядке добавления)
-    #   titles  — JSON-массив названий в том же порядке (опционально)
-    files = request.files.getlist('files')
-    if not files:
-        return jsonify({'error': 'No files uploaded'}), 400
-
-    titles = request.form.getlist('titles')
-
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            zip_path = os.path.join(tmpdir, 'playlist.zip')
-            with zipfile.ZipFile(zip_path, 'w') as zipf:
-                for idx, f in enumerate(files):
-                    title = titles[idx] if idx < len(titles) else f"track_{idx+1}"
-                    filename = f"{idx+1:02d} - {title}.mp3"
-                    safe_filename = re.sub(r'[\\/*?:"<>|]', '', filename)
-                    filepath = os.path.join(tmpdir, safe_filename)
-                    f.save(filepath)
-                    zipf.write(filepath, safe_filename)
-            return send_file(zip_path, as_attachment=True, download_name='playlist.zip')
-    except Exception as e:
-        logging.error(f"ZIP upload error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# ===== ЭНДПОИНТ /merge-upload (браузер скачал mp3 сам и грузит нам байты для склейки) =====
-@app.route('/merge-upload', methods=['POST'])
-def merge_upload():
-    # Ожидается multipart/form-data:
-    #   files — несколько mp3-файлов В ПРАВИЛЬНОМ ПОРЯДКЕ склейки
-    files = request.files.getlist('files')
-    if not files:
-        return jsonify({'error': 'No files uploaded'}), 400
-
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mp3_files = []
-            for idx, f in enumerate(files):
-                filename = f"{idx:04d}.mp3"
-                filepath = os.path.join(tmpdir, filename)
-                f.save(filepath)
-                mp3_files.append(filepath)
-
-            list_path = os.path.join(tmpdir, 'list.txt')
-            with open(list_path, 'w') as fh:
-                for mp3 in mp3_files:
-                    fh.write(f"file '{os.path.basename(mp3)}'\n")
-
-            output_path = os.path.join(tmpdir, 'merged.mp3')
-            cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy', output_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=tmpdir, timeout=300)
-            if result.returncode != 0:
-                logging.error(f"FFmpeg error: {result.stderr}")
-                return jsonify({'error': 'FFmpeg merge failed'}), 500
-
-            return send_file(output_path, as_attachment=True, download_name='merged.mp3')
-    except Exception as e:
-        logging.error(f"Merge upload error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# ===== ДИАГНОСТИКА: тест yt-dlp прямо на сервере (без доступа к терминалу) =====
-@app.route('/test-ytdlp', methods=['GET'])
-def test_ytdlp():
-    test_video_url = request.args.get('url', 'https://www.youtube.com/watch?v=j3i_-mTVkZk')
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output_template = os.path.join(tmpdir, 'test.%(ext)s')
-        cmd = [
-            'yt-dlp', '-x', '--audio-format', 'mp3',
-            '-o', output_template,
-            test_video_url
-        ]
-        start = time.time()
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        except subprocess.TimeoutExpired as e:
-            return jsonify({
-                'ok': False,
-                'error': 'timeout после 60 секунд — похоже на троттлинг/блокировку',
-                'stdout': (e.stdout or b'').decode(errors='ignore')[-2000:] if e.stdout else '',
-                'stderr': (e.stderr or b'').decode(errors='ignore')[-2000:] if e.stderr else '',
-            }), 200
-        elapsed = round(time.time() - start, 2)
-
-        files = os.listdir(tmpdir)
-        mp3_size = None
-        for f in files:
-            if f.endswith('.mp3'):
-                mp3_size = os.path.getsize(os.path.join(tmpdir, f))
-
-        return jsonify({
-            'ok': result.returncode == 0 and mp3_size is not None,
-            'elapsed_seconds': elapsed,
-            'returncode': result.returncode,
-            'mp3_size_bytes': mp3_size,
-            'stdout_tail': result.stdout[-1500:],
-            'stderr_tail': result.stderr[-1500:],
-        })
 
 if __name__ == '__main__':
     print("Starting server...")
