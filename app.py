@@ -66,6 +66,16 @@ def download_audio(video_url, output_dir, filename_base, retries=3):
         'no_warnings': True,
         'noprogress': True,
         'socket_timeout': 30,
+        # YouTube агрессивно подозревает датацентровые IP в скрейпинге и
+        # требует "Sign in to confirm you're not a bot". У Android-клиента
+        # YouTube проверка мягче — притворяемся им.
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web'],
+            }
+        },
+        # Небольшая пауза между запросами снижает шанс словить бот-проверку
+        'sleep_interval_requests': 1,
     }
 
     mp3_path = os.path.join(output_dir, f"{filename_base}.mp3")
@@ -281,6 +291,47 @@ def merge_tracks():
     except Exception as e:
         logging.error(f"Merge error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+# ===== ДИАГНОСТИКА: тест yt-dlp прямо на сервере =====
+@app.route('/test-ytdlp', methods=['GET'])
+def test_ytdlp():
+    import subprocess
+    test_video_url = request.args.get('url', 'https://www.youtube.com/watch?v=j3i_-mTVkZk')
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_template = os.path.join(tmpdir, 'test.%(ext)s')
+        cmd = [
+            'yt-dlp', '-x', '--audio-format', 'mp3',
+            '--extractor-args', 'youtube:player_client=android,web',
+            '-o', output_template,
+            test_video_url
+        ]
+        start = time.time()
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired as e:
+            return jsonify({
+                'ok': False,
+                'error': 'timeout после 60 секунд — похоже на троттлинг/блокировку',
+                'stdout': (e.stdout or b'').decode(errors='ignore')[-2000:] if e.stdout else '',
+                'stderr': (e.stderr or b'').decode(errors='ignore')[-2000:] if e.stderr else '',
+            }), 200
+        elapsed = round(time.time() - start, 2)
+
+        files = os.listdir(tmpdir)
+        mp3_size = None
+        for f in files:
+            if f.endswith('.mp3'):
+                mp3_size = os.path.getsize(os.path.join(tmpdir, f))
+
+        return jsonify({
+            'ok': result.returncode == 0 and mp3_size is not None,
+            'elapsed_seconds': elapsed,
+            'returncode': result.returncode,
+            'mp3_size_bytes': mp3_size,
+            'stdout_tail': result.stdout[-1500:],
+            'stderr_tail': result.stderr[-1500:],
+        })
 
 if __name__ == '__main__':
     print("Starting server...")
