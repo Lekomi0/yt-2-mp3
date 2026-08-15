@@ -259,7 +259,7 @@ def run_zip_job(job_id, tracks):
             increment_job_progress(job_id)
             return idx, track.get('title', filename_base), path
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = [executor.submit(job, idx, track) for idx, track in enumerate(tracks)]
             for future in as_completed(futures):
                 idx, title, path = future.result()
@@ -296,7 +296,7 @@ def run_merge_job(job_id, tracks):
             increment_job_progress(job_id)
             return idx, path
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = [executor.submit(job, idx, track) for idx, track in enumerate(tracks)]
             for future in as_completed(futures):
                 idx, path = future.result()
