@@ -52,6 +52,16 @@ def switch_to_next_key():
 # ===== СКАЧИВАНИЕ АУДИО ЧЕРЕЗ yt-dlp =====
 # Качает видео напрямую с YouTube и сразу конвертирует в mp3 через ffmpeg
 # (постпроцессор yt-dlp), без сторонних сервисов.
+# ===== COOKIES ДЛЯ ОБХОДА "Sign in to confirm you're not a bot" =====
+# Render Secret Files монтируются по пути /etc/secrets/<имя файла>.
+# Если файла нет — просто работаем без cookies (как раньше).
+COOKIES_FILE = os.getenv('COOKIES_FILE_PATH', '/etc/secrets/cookies.txt')
+if os.path.exists(COOKIES_FILE):
+    logging.info(f"Найден cookies-файл: {COOKIES_FILE}")
+else:
+    logging.warning(f"Cookies-файл не найден ({COOKIES_FILE}) — будем качать без авторизации")
+    COOKIES_FILE = None
+
 def download_audio(video_url, output_dir, filename_base, retries=3):
     output_template = os.path.join(output_dir, f"{filename_base}.%(ext)s")
     ydl_opts = {
@@ -77,6 +87,8 @@ def download_audio(video_url, output_dir, filename_base, retries=3):
         # Небольшая пауза между запросами снижает шанс словить бот-проверку
         'sleep_interval_requests': 1,
     }
+    if COOKIES_FILE:
+        ydl_opts['cookiefile'] = COOKIES_FILE
 
     mp3_path = os.path.join(output_dir, f"{filename_base}.mp3")
 
@@ -304,8 +316,10 @@ def test_ytdlp():
             'yt-dlp', '-x', '--audio-format', 'mp3',
             '--extractor-args', 'youtube:player_client=android,web',
             '-o', output_template,
-            test_video_url
         ]
+        if COOKIES_FILE:
+            cmd += ['--cookies', COOKIES_FILE]
+        cmd.append(test_video_url)
         start = time.time()
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -326,6 +340,7 @@ def test_ytdlp():
 
         return jsonify({
             'ok': result.returncode == 0 and mp3_size is not None,
+            'cookies_used': COOKIES_FILE is not None,
             'elapsed_seconds': elapsed,
             'returncode': result.returncode,
             'mp3_size_bytes': mp3_size,
