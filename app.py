@@ -53,14 +53,21 @@ def switch_to_next_key():
 # Качает видео напрямую с YouTube и сразу конвертирует в mp3 через ffmpeg
 # (постпроцессор yt-dlp), без сторонних сервисов.
 # ===== COOKIES ДЛЯ ОБХОДА "Sign in to confirm you're not a bot" =====
-# Render Secret Files монтируются по пути /etc/secrets/<имя файла>.
-# Если файла нет — просто работаем без cookies (как раньше).
-COOKIES_FILE = os.getenv('COOKIES_FILE_PATH', '/etc/secrets/cookies.txt')
-if os.path.exists(COOKIES_FILE):
-    logging.info(f"Найден cookies-файл: {COOKIES_FILE}")
+# Render Secret Files монтируются по пути /etc/secrets/<имя файла> и он READ-ONLY.
+# yt-dlp в конце пытается перезаписать файл с куками (YouTube может их
+# ротировать) — поэтому копируем в writable-копию во временной директории,
+# а не отдаём yt-dlp путь до read-only секрета напрямую.
+import shutil
+
+_COOKIES_SOURCE = os.getenv('COOKIES_FILE_PATH', '/etc/secrets/cookies.txt')
+COOKIES_FILE = None
+if os.path.exists(_COOKIES_SOURCE):
+    _writable_cookies = os.path.join(tempfile.gettempdir(), 'cookies_writable.txt')
+    shutil.copy(_COOKIES_SOURCE, _writable_cookies)
+    COOKIES_FILE = _writable_cookies
+    logging.info(f"Найден cookies-файл: {_COOKIES_SOURCE} → скопирован в {COOKIES_FILE}")
 else:
-    logging.warning(f"Cookies-файл не найден ({COOKIES_FILE}) — будем качать без авторизации")
-    COOKIES_FILE = None
+    logging.warning(f"Cookies-файл не найден ({_COOKIES_SOURCE}) — будем качать без авторизации")
 
 def download_audio(video_url, output_dir, filename_base, retries=3):
     output_template = os.path.join(output_dir, f"{filename_base}.%(ext)s")
@@ -76,12 +83,13 @@ def download_audio(video_url, output_dir, filename_base, retries=3):
         'no_warnings': True,
         'noprogress': True,
         'socket_timeout': 30,
-        # YouTube агрессивно подозревает датацентровые IP в скрейпинге и
-        # требует "Sign in to confirm you're not a bot". У Android-клиента
-        # YouTube проверка мягче — притворяемся им.
+        # YouTube сейчас принудительно переводит web-клиент на SABR-стриминг,
+        # для которого нужен JS-движок для расшифровки подписи — без него
+        # получаем "Only images are available". android-клиент этой
+        # проблеме не подвержен, поэтому используем только его.
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web'],
+                'player_client': ['android'],
             }
         },
         # Небольшая пауза между запросами снижает шанс словить бот-проверку
@@ -314,7 +322,7 @@ def test_ytdlp():
         output_template = os.path.join(tmpdir, 'test.%(ext)s')
         cmd = [
             'yt-dlp', '-x', '--audio-format', 'mp3',
-            '--extractor-args', 'youtube:player_client=android,web',
+            '--extractor-args', 'youtube:player_client=android',
             '-o', output_template,
         ]
         if COOKIES_FILE:
