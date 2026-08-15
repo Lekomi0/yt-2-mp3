@@ -213,104 +213,173 @@ def playlist():
 
     return jsonify({'error': 'All API keys quota exceeded'}), 500
 
-# ===== ЭНДПОИНТ /zip (скачивает все треки через yt-dlp и пакует в ZIP) =====
-@app.route('/zip', methods=['POST'])
-def zip_tracks():
+# ===== ФОНОВЫЕ ЗАДАЧИ (ZIP/MERGE) =====
+# Большие плейлисты качаются минутами — держать HTTP-запрос открытым всё
+# это время ненадёжно (таймауты у хостера/браузера рвут соединение).
+# Поэтому запускаем скачивание в фоновом потоке, а фронтенд опрашивает
+# статус и забирает готовый файл отдельным запросом.
+import uuid
+import threading
+import subprocess
+
+jobs = {}
+jobs_lock = threading.Lock()
+
+def create_job(total):
+    job_id = str(uuid.uuid4())
+    with jobs_lock:
+        jobs[job_id] = {
+            'status': 'pending',
+            'completed': 0,
+            'total': total,
+            'file_path': None,
+            'download_name': None,
+            'error': None,
+        }
+    return job_id
+
+def update_job(job_id, **kwargs):
+    with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id].update(kwargs)
+
+def increment_job_progress(job_id):
+    with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]['completed'] += 1
+
+def run_zip_job(job_id, tracks):
+    tmpdir = tempfile.mkdtemp()
+    try:
+        downloaded = [None] * len(tracks)
+
+        def job(idx, track):
+            filename_base = f"track_{idx:04d}"
+            path = download_audio(track['url'], tmpdir, filename_base)
+            increment_job_progress(job_id)
+            return idx, track.get('title', filename_base), path
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(job, idx, track) for idx, track in enumerate(tracks)]
+            for future in as_completed(futures):
+                idx, title, path = future.result()
+                if path:
+                    downloaded[idx] = (title, path)
+                else:
+                    logging.warning(f"Не удалось скачать: {title}")
+
+        downloaded = [d for d in downloaded if d is not None]
+        if not downloaded:
+            update_job(job_id, status='error', error='No MP3 files downloaded')
+            return
+
+        zip_path = os.path.join(tmpdir, 'playlist.zip')
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            for i, (title, path) in enumerate(downloaded):
+                filename = f"{i+1:02d} - {title}.mp3"
+                safe_filename = re.sub(r'[\\/*?:"<>|]', '', filename)
+                zipf.write(path, safe_filename)
+
+        update_job(job_id, status='done', file_path=zip_path, download_name='playlist.zip')
+    except Exception as e:
+        logging.error(f"ZIP job error: {str(e)}")
+        update_job(job_id, status='error', error=str(e))
+
+def run_merge_job(job_id, tracks):
+    tmpdir = tempfile.mkdtemp()
+    try:
+        downloaded = [None] * len(tracks)
+
+        def job(idx, track):
+            filename_base = f"track_{idx:04d}"
+            path = download_audio(track['url'], tmpdir, filename_base)
+            increment_job_progress(job_id)
+            return idx, path
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(job, idx, track) for idx, track in enumerate(tracks)]
+            for future in as_completed(futures):
+                idx, path = future.result()
+                if path:
+                    downloaded[idx] = path
+                else:
+                    logging.warning(f"Не удалось скачать трек #{idx}")
+
+        mp3_files = [p for p in downloaded if p is not None]
+        if not mp3_files:
+            update_job(job_id, status='error', error='No MP3 files downloaded')
+            return
+
+        list_path = os.path.join(tmpdir, 'list.txt')
+        with open(list_path, 'w') as f:
+            for mp3 in mp3_files:
+                f.write(f"file '{os.path.basename(mp3)}'\n")
+
+        output_path = os.path.join(tmpdir, 'merged.mp3')
+        cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy', output_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=tmpdir, timeout=300)
+        if result.returncode != 0:
+            logging.error(f"FFmpeg error: {result.stderr}")
+            update_job(job_id, status='error', error='FFmpeg merge failed')
+            return
+
+        update_job(job_id, status='done', file_path=output_path, download_name='merged.mp3')
+    except Exception as e:
+        logging.error(f"Merge job error: {str(e)}")
+        update_job(job_id, status='error', error=str(e))
+
+# ===== ЭНДПОИНТ /zip/start (запускает фоновую задачу, сразу отдаёт job_id) =====
+@app.route('/zip/start', methods=['POST'])
+def zip_start():
     data = request.get_json()
     if not data or 'tracks' not in data:
         return jsonify({'error': 'Missing tracks list'}), 400
-
     tracks = data['tracks']
     if not tracks:
         return jsonify({'error': 'Empty tracks list'}), 400
 
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            downloaded = [None] * len(tracks)
+    job_id = create_job(len(tracks))
+    threading.Thread(target=run_zip_job, args=(job_id, tracks), daemon=True).start()
+    return jsonify({'job_id': job_id})
 
-            def job(idx, track):
-                filename_base = f"track_{idx:04d}"
-                path = download_audio(track['url'], tmpdir, filename_base)
-                return idx, track.get('title', filename_base), path
-
-            # Небольшой параллелизм — YouTube тоже может троттлить при
-            # слишком частых параллельных запросах с одного IP.
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = [executor.submit(job, idx, track) for idx, track in enumerate(tracks)]
-                for future in as_completed(futures):
-                    idx, title, path = future.result()
-                    if path:
-                        downloaded[idx] = (title, path)
-                    else:
-                        logging.warning(f"Не удалось скачать: {title}")
-
-            downloaded = [d for d in downloaded if d is not None]
-            if not downloaded:
-                return jsonify({'error': 'No MP3 files downloaded'}), 500
-
-            zip_path = os.path.join(tmpdir, 'playlist.zip')
-            with zipfile.ZipFile(zip_path, 'w') as zipf:
-                for i, (title, path) in enumerate(downloaded):
-                    filename = f"{i+1:02d} - {title}.mp3"
-                    safe_filename = re.sub(r'[\\/*?:"<>|]', '', filename)
-                    zipf.write(path, safe_filename)
-
-            return send_file(zip_path, as_attachment=True, download_name='playlist.zip')
-    except Exception as e:
-        logging.error(f"ZIP error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# ===== ЭНДПОИНТ /merge (скачивает все треки через yt-dlp и склеивает через ffmpeg) =====
-@app.route('/merge', methods=['POST'])
-def merge_tracks():
-    import subprocess
-
+# ===== ЭНДПОИНТ /merge/start (аналогично, для склейки) =====
+@app.route('/merge/start', methods=['POST'])
+def merge_start():
     data = request.get_json()
     if not data or 'tracks' not in data:
         return jsonify({'error': 'Missing tracks list'}), 400
-
     tracks = data['tracks']
     if not tracks:
         return jsonify({'error': 'Empty tracks list'}), 400
 
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            downloaded = [None] * len(tracks)
+    job_id = create_job(len(tracks))
+    threading.Thread(target=run_merge_job, args=(job_id, tracks), daemon=True).start()
+    return jsonify({'job_id': job_id})
 
-            def job(idx, track):
-                filename_base = f"track_{idx:04d}"
-                path = download_audio(track['url'], tmpdir, filename_base)
-                return idx, path
+# ===== ЭНДПОИНТ /job/<id>/status (опрос прогресса) =====
+@app.route('/job/<job_id>/status', methods=['GET'])
+def job_status(job_id):
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    return jsonify({
+        'status': job['status'],
+        'completed': job['completed'],
+        'total': job['total'],
+        'error': job['error'],
+    })
 
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                futures = [executor.submit(job, idx, track) for idx, track in enumerate(tracks)]
-                for future in as_completed(futures):
-                    idx, path = future.result()
-                    if path:
-                        downloaded[idx] = path
-                    else:
-                        logging.warning(f"Не удалось скачать трек #{idx}")
-
-            mp3_files = [p for p in downloaded if p is not None]
-            if not mp3_files:
-                return jsonify({'error': 'No MP3 files downloaded'}), 500
-
-            list_path = os.path.join(tmpdir, 'list.txt')
-            with open(list_path, 'w') as f:
-                for mp3 in mp3_files:
-                    f.write(f"file '{os.path.basename(mp3)}'\n")
-
-            output_path = os.path.join(tmpdir, 'merged.mp3')
-            cmd = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy', output_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=tmpdir, timeout=300)
-            if result.returncode != 0:
-                logging.error(f"FFmpeg error: {result.stderr}")
-                return jsonify({'error': 'FFmpeg merge failed'}), 500
-
-            return send_file(output_path, as_attachment=True, download_name='merged.mp3')
-    except Exception as e:
-        logging.error(f"Merge error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+# ===== ЭНДПОИНТ /job/<id>/download (забрать готовый файл) =====
+@app.route('/job/<job_id>/download', methods=['GET'])
+def job_download(job_id):
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    if job['status'] != 'done':
+        return jsonify({'error': 'Job not finished yet'}), 400
+    return send_file(job['file_path'], as_attachment=True, download_name=job['download_name'])
 
 # ===== ДИАГНОСТИКА: тест yt-dlp прямо на сервере =====
 @app.route('/test-ytdlp', methods=['GET'])
@@ -358,5 +427,5 @@ def test_ytdlp():
 
 if __name__ == '__main__':
     print("Starting server...")
-    app.run(host='0.0.0.0', port=8080)
+    app.run(host='0.0.0.0', port=8080, threaded=True)
     print("Server started")
