@@ -382,6 +382,39 @@ def job_download(job_id):
     return send_file(job['file_path'], as_attachment=True, download_name=job['download_name'])
 
 # ===== ДИАГНОСТИКА: тест yt-dlp прямо на сервере =====
+@app.route('/test-convert1s', methods=['GET'])
+def test_convert1s():
+    headers = {
+        'accept': 'application/json',
+        'content-type': 'application/json',
+        'origin': 'https://media.ytmp3.gg',
+        'referer': 'https://media.ytmp3.gg/',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    }
+    payload = {
+        "url": "https://www.youtube.com/watch?v=j3i_-mTVkZk",
+        "os": "windows",
+        "output": {"type": "audio", "format": "mp3"},
+        "audio": {"bitrate": "128k"}
+    }
+    start = time.time()
+    try:
+        resp = requests.post('https://hub.convert1s.com/api/download', json=payload, headers=headers, timeout=15)
+        elapsed = round(time.time() - start, 2)
+        return jsonify({
+            'ok': resp.status_code == 200,
+            'status_code': resp.status_code,
+            'elapsed_seconds': elapsed,
+            'body_preview': resp.text[:500],
+        })
+    except Exception as e:
+        elapsed = round(time.time() - start, 2)
+        return jsonify({
+            'ok': False,
+            'elapsed_seconds': elapsed,
+            'error': str(e),
+        })
+
 @app.route('/test-ytdlp', methods=['GET'])
 def test_ytdlp():
     import subprocess
