@@ -560,43 +560,60 @@
         });
     }
 
-    // ===== ФУНКЦИИ ДЛЯ ZIP / MERGE (всё скачивание и упаковка — на сервере) =====
-    async function downloadAsZip(tracks, onProgress) {
-        onProgress?.('Скачивание и упаковка на сервере...');
-        const resp = await fetch(`${API_BASE}/zip`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tracks })
-        });
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}));
-            throw new Error(err.error || 'Ошибка сервера при упаковке ZIP');
+    // ===== ФУНКЦИИ ДЛЯ ZIP / MERGE (фоновая задача на сервере + опрос прогресса) =====
+    async function pollJobAndDownload(jobId, downloadName, onProgress) {
+        while (true) {
+            await new Promise(res => setTimeout(res, 2000));
+            const statusResp = await fetch(`${API_BASE}/job/${jobId}/status`);
+            if (!statusResp.ok) throw new Error('Не удалось узнать статус задачи');
+            const status = await statusResp.json();
+
+            if (status.status === 'error') {
+                throw new Error(status.error || 'Ошибка на сервере');
+            }
+            onProgress?.(`Скачано ${status.completed}/${status.total} треков...`);
+            if (status.status === 'done') break;
         }
-        const blob = await resp.blob();
+
+        onProgress?.('Готово, скачиваем результат...');
+        const fileResp = await fetch(`${API_BASE}/job/${jobId}/download`);
+        if (!fileResp.ok) throw new Error('Не удалось скачать готовый файл');
+        const blob = await fileResp.blob();
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = 'playlist.zip';
+        a.download = downloadName;
         a.click();
         URL.revokeObjectURL(a.href);
     }
 
-    async function downloadAndMerge(tracks, onProgress) {
-        onProgress?.('Скачивание и склейка на сервере...');
-        const resp = await fetch(`${API_BASE}/merge`, {
+    async function downloadAsZip(tracks, onProgress) {
+        onProgress?.('Запускаем скачивание на сервере...');
+        const resp = await fetch(`${API_BASE}/zip/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ tracks })
         });
         if (!resp.ok) {
             const err = await resp.json().catch(() => ({}));
-            throw new Error(err.error || 'Ошибка сервера при склейке');
+            throw new Error(err.error || 'Ошибка запуска задачи');
         }
-        const blob = await resp.blob();
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = 'merged.mp3';
-        a.click();
-        URL.revokeObjectURL(a.href);
+        const { job_id } = await resp.json();
+        await pollJobAndDownload(job_id, 'playlist.zip', onProgress);
+    }
+
+    async function downloadAndMerge(tracks, onProgress) {
+        onProgress?.('Запускаем скачивание на сервере...');
+        const resp = await fetch(`${API_BASE}/merge/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tracks })
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.error || 'Ошибка запуска задачи');
+        }
+        const { job_id } = await resp.json();
+        await pollJobAndDownload(job_id, 'merged.mp3', onProgress);
     }
 
     // Возвращает только те треки, у которых чекбокс отмечен
