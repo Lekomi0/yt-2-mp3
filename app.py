@@ -83,13 +83,13 @@ def download_audio(video_url, output_dir, filename_base, retries=3):
         'no_warnings': True,
         'noprogress': True,
         'socket_timeout': 30,
-        # YouTube сейчас принудительно переводит web-клиент на SABR-стриминг,
-        # для которого нужен JS-движок для расшифровки подписи — без него
-        # получаем "Only images are available". android-клиент этой
-        # проблеме не подвержен, поэтому используем только его.
+        # android не поддерживает cookies (yt-dlp его просто пропускает),
+        # поэтому используем web — единственный клиент, совместимый с
+        # куками. Для решения его подписи нужен JS-движок (Deno, см.
+        # Dockerfile) — без него web отдаёт только превью-картинки.
         'extractor_args': {
             'youtube': {
-                'player_client': ['android'],
+                'player_client': ['web'],
             }
         },
         # Небольшая пауза между запросами снижает шанс словить бот-проверку
@@ -322,7 +322,7 @@ def test_ytdlp():
         output_template = os.path.join(tmpdir, 'test.%(ext)s')
         cmd = [
             'yt-dlp', '-x', '--audio-format', 'mp3',
-            '--extractor-args', 'youtube:player_client=android',
+            '--extractor-args', 'youtube:player_client=web',
             '-o', output_template,
         ]
         if COOKIES_FILE:
