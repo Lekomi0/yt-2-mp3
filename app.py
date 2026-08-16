@@ -117,6 +117,48 @@ def download_audio(video_url, output_dir, filename_base, retries=3):
 
     return None
 
+# ===== ХРАНИЛИЩЕ ДЛЯ ГОТОВЫХ ФАЙЛОВ (для /convert + /files) =====
+# Не обязано жить вечно — плагин майнкрафта скачивает файл один раз и сам
+# кэширует его у себя, так что нам достаточно, чтобы файл дожил хотя бы до
+# первого запроса плагина после конвертации.
+STORAGE_DIR = '/tmp/converted-files'
+os.makedirs(STORAGE_DIR, exist_ok=True)
+
+# ===== ЭНДПОИНТ /convert (медленный шаг: качает и кладёт в статику) =====
+# Вызывать из браузера самому — займёт 40-60 сек, вернёт готовую БЫСТРУЮ
+# прямую ссылку на файл (для вставки в плагин/пластинку).
+@app.route('/convert', methods=['GET', 'OPTIONS'])
+def convert():
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Missing url parameter'}), 400
+
+    file_id = str(uuid.uuid4())
+    mp3_path = download_audio(url, STORAGE_DIR, file_id)
+    if not mp3_path:
+        return jsonify({'error': 'Не удалось скачать трек'}), 500
+
+    final_name = f"{file_id}.mp3"
+    final_path = os.path.join(STORAGE_DIR, final_name)
+    if mp3_path != final_path:
+        os.rename(mp3_path, final_path)
+
+    direct_url = request.host_url.rstrip('/') + f"/files/{final_name}"
+    return jsonify({'url': direct_url})
+
+# ===== ЭНДПОИНТ /files/<filename> (быстрая раздача уже готового файла) =====
+@app.route('/files/<path:filename>', methods=['GET'])
+def serve_file(filename):
+    # Простая защита от path traversal — берём только сам файл, без ../
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(STORAGE_DIR, safe_name)
+    if not os.path.exists(file_path):
+        return jsonify({'error': 'File not found (возможно, сервер перезапускался)'}), 404
+    return send_file(file_path, mimetype='audio/mpeg', as_attachment=False)
+
 # ===== ЭНДПОИНТ /download (скачать один трек — отдаёт mp3 файлом) =====
 @app.route('/download', methods=['GET', 'OPTIONS'])
 def download():
@@ -424,16 +466,18 @@ def test_convert1s():
 def test_ytdlp():
     import subprocess
     test_video_url = request.args.get('url', 'https://www.youtube.com/watch?v=j3i_-mTVkZk')
+    client = request.args.get('client', 'web')  # ?client=android или ?client=web
+    use_cookies = request.args.get('cookies', '1') != '0'  # ?cookies=0 чтобы отключить
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_template = os.path.join(tmpdir, 'test.%(ext)s')
         cmd = [
             'yt-dlp', '-x', '--audio-format', 'mp3',
-            '--extractor-args', 'youtube:player_client=web',
+            '--extractor-args', f'youtube:player_client={client}',
             '--cache-dir', '/tmp/ytdlp-cache',
             '-o', output_template,
         ]
-        if COOKIES_FILE:
+        if COOKIES_FILE and use_cookies:
             cmd += ['--cookies', COOKIES_FILE]
         cmd.append(test_video_url)
         start = time.time()
@@ -456,7 +500,8 @@ def test_ytdlp():
 
         return jsonify({
             'ok': result.returncode == 0 and mp3_size is not None,
-            'cookies_used': COOKIES_FILE is not None,
+            'cookies_used': COOKIES_FILE is not None and use_cookies,
+            'player_client': client,
             'elapsed_seconds': elapsed,
             'returncode': result.returncode,
             'mp3_size_bytes': mp3_size,
