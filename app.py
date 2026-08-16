@@ -94,6 +94,11 @@ def download_audio(video_url, output_dir, filename_base, retries=3):
         },
         # Небольшая пауза между запросами снижает шанс словить бот-проверку
         'sleep_interval_requests': 1,
+        # Явно фиксируем кэш-директорию — yt-dlp кэширует туда анализ
+        # плеера/решение JS-challenge. Она общая для всех треков в рамках
+        # жизни контейнера, так что первый трек будет медленным, а
+        # следующие — значительно быстрее (challenge не решается заново).
+        'cachedir': '/tmp/ytdlp-cache',
     }
     if COOKIES_FILE:
         ydl_opts['cookiefile'] = COOKIES_FILE
@@ -425,6 +430,7 @@ def test_ytdlp():
         cmd = [
             'yt-dlp', '-x', '--audio-format', 'mp3',
             '--extractor-args', 'youtube:player_client=web',
+            '--cache-dir', '/tmp/ytdlp-cache',
             '-o', output_template,
         ]
         if COOKIES_FILE:
