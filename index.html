@@ -399,6 +399,13 @@
     const API_BASE = 'https://yt-2-mp3.relaxdev.ru';
     let currentTracks = [];
 
+    function renderLinkResult(container, url, label) {
+        container.innerHTML = `
+            <span class="link">✅ <a href="${url}" target="_blank">${label || url}</a></span>
+            <button class="copy-btn" onclick="copyLink('${url}')">копировать</button>
+        `;
+    }
+
     // ===== ОСНОВНАЯ ЛОГИКА =====
     async function process() {
         const urlInput = document.getElementById('urlInput');
@@ -421,32 +428,20 @@
         url = url.replace(/\\/g, '');
 
         if (!url.includes('list=')) {
-            trackListDiv.style.display = 'none';
-            trackListDiv.innerHTML = '';
-            const apiUrl = `${API_BASE}/download?url=${encodeURIComponent(url)}`;
-            resultDiv.innerHTML = `
-                <span class="link">✅ <a href="${apiUrl}" download>⬇ Скачать mp3</a></span>
-                <span style="font-size:11px; opacity:0.7;">(скачивание начнётся сразу — сервер сам качает и конвертирует)</span>
-            `;
+            await handleSingleVideo(url, resultDiv);
             return;
         }
 
-        trackListDiv.style.display = 'none';
-        trackListDiv.innerHTML = '';
+        resultDiv.innerHTML = '<span class="link loading">⏳ загружаем...</span>';
 
         try {
             const urlParams = new URLSearchParams(new URL(url).search);
             let videoId = urlParams.get('v');
 
             if (videoId) {
-                // Есть конкретный трек — сразу показываем прямую ссылку на скачивание
-                const downloadUrl = `${API_BASE}/download?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`;
-                resultDiv.innerHTML = `
-                    <span class="link">✅ <a href="${downloadUrl}" download>⬇ Скачать mp3</a></span>
-                `;
+                await handleSingleVideo(`https://www.youtube.com/watch?v=${videoId}`, resultDiv);
                 resultDiv.innerHTML += '<br><span class="link loading">⏳ загружаем плейлист...</span>';
             } else {
-                // Чистая ссылка на плейлист без конкретного видео — сразу грузим список треков
                 resultDiv.innerHTML = '<span class="link loading">⏳ загружаем плейлист...</span>';
             }
 
@@ -491,6 +486,62 @@
         }
     }
 
+    // Показывает превью (название + миниатюра) одиночного видео и кнопку
+    // "получить ссылку" — сама конвертация запускается только по клику,
+    // а не автоматически (чтобы не тратить время, если человек просто
+    // проверяет ссылку).
+    async function handleSingleVideo(videoUrl, resultDiv) {
+        resultDiv.innerHTML = '<span class="link loading">⏳ получаем информацию о видео...</span>';
+        let title = '';
+        let thumbnail = '';
+        try {
+            const infoResp = await fetch(`${API_BASE}/video-info?url=${encodeURIComponent(videoUrl)}`);
+            const info = await infoResp.json();
+            if (!info.error) {
+                title = info.title;
+                thumbnail = info.thumbnail;
+            }
+        } catch (e) { /* не критично, продолжаем без превью */ }
+
+        const previewHtml = thumbnail
+            ? `<img src="${thumbnail}" alt="" style="width:120px;height:90px;object-fit:cover;border:1px inset #808080;display:block;margin-bottom:6px;">`
+            : '';
+        const titleHtml = title
+            ? `<div style="color:#fff;font-size:13px;margin-bottom:6px;">${title}</div>`
+            : '';
+
+        resultDiv.innerHTML = `
+            <div style="width:100%;">
+                ${previewHtml}
+                ${titleHtml}
+                <button id="getLinkBtn" class="copy-btn" style="padding:5px 14px;">🔗 Получить ссылку</button>
+            </div>
+        `;
+
+        document.getElementById('getLinkBtn').onclick = async () => {
+            const btn = document.getElementById('getLinkBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ конвертируем...';
+            try {
+                const resp = await fetch(`${API_BASE}/convert?url=${encodeURIComponent(videoUrl)}`);
+                const data = await resp.json();
+                if (data.error) {
+                    btn.textContent = '❌ ' + data.error;
+                    btn.disabled = false;
+                    return;
+                }
+                const wrapper = btn.parentElement;
+                const linkDiv = document.createElement('div');
+                linkDiv.style.marginTop = '8px';
+                renderLinkResult(linkDiv, data.url, '🔗 прямая ссылка');
+                btn.replaceWith(linkDiv);
+            } catch (e) {
+                btn.textContent = '❌ ошибка';
+                btn.disabled = false;
+            }
+        };
+    }
+
     function renderTrackList(tracks) {
         const trackListDiv = document.getElementById('trackList');
         trackListDiv.innerHTML = '';
@@ -499,7 +550,8 @@
         tracks.forEach((track, index) => {
             const item = document.createElement('div');
             item.className = 'track-item';
-            item.dataset.url = track.url;  // сохраняем URL для сбора ссылок
+            item.dataset.url = track.url;
+            item.dataset.idx = index;
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
@@ -519,19 +571,27 @@
 
             const actionCell = document.createElement('span');
             actionCell.className = 'track-action';
+            actionCell.id = `track-action-${index}`;
 
             const btn = document.createElement('button');
             btn.className = 'track-btn';
             btn.textContent = 'mp3';
-            btn.onclick = () => {
-                const downloadUrl = `${API_BASE}/download?url=${encodeURIComponent(track.url)}`;
-                actionCell.innerHTML = '';
-                const openLink = document.createElement('a');
-                openLink.href = downloadUrl;
-                openLink.setAttribute('download', '');
-                openLink.className = 'track-link-btn';
-                openLink.textContent = '⬇ скачать';
-                actionCell.appendChild(openLink);
+            btn.onclick = async () => {
+                btn.disabled = true;
+                btn.textContent = '⏳';
+                try {
+                    const resp = await fetch(`${API_BASE}/convert?url=${encodeURIComponent(track.url)}`);
+                    const data = await resp.json();
+                    if (data.error) {
+                        btn.textContent = '❌';
+                        btn.disabled = false;
+                        return;
+                    }
+                    setTrackRowLink(index, data.url);
+                } catch (e) {
+                    btn.textContent = '❌';
+                    btn.disabled = false;
+                }
             };
 
             actionCell.appendChild(btn);
@@ -544,14 +604,46 @@
         });
     }
 
+    // Заменяет кнопку "mp3" в строке трека на прямую ссылку — используется
+    // и при ручном клике, и автоматически по мере готовности треков в
+    // фоновой задаче ZIP/Merge (чтобы не скачивать по новой).
+    function setTrackRowLink(idx, url) {
+        const actionCell = document.getElementById(`track-action-${idx}`);
+        if (!actionCell || actionCell.dataset.linked === '1') return;
+        actionCell.dataset.linked = '1';
+        actionCell.innerHTML = '';
+        const openLink = document.createElement('a');
+        openLink.href = url;
+        openLink.target = '_blank';
+        openLink.className = 'track-link-btn';
+        openLink.textContent = '🔗 ссылка';
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'track-copy-btn';
+        copyBtn.textContent = '📋';
+        copyBtn.onclick = () => {
+            navigator.clipboard.writeText(url).then(() => {
+                copyBtn.textContent = '✅';
+                copyBtn.classList.add('copied');
+                setTimeout(() => {
+                    copyBtn.textContent = '📋';
+                    copyBtn.classList.remove('copied');
+                }, 2000);
+            }).catch(() => alert('не удалось скопировать'));
+        };
+        actionCell.appendChild(openLink);
+        actionCell.appendChild(copyBtn);
+    }
+
     function copyLink(link) {
         navigator.clipboard.writeText(link).then(() => {
-            const btn = document.querySelector('.copy-btn');
+            const btns = document.querySelectorAll('.copy-btn');
+            const btn = btns[btns.length - 1];
             if (btn) {
+                const original = btn.textContent;
                 btn.textContent = '✅ скопировано';
                 btn.classList.add('copied');
                 setTimeout(() => {
-                    btn.textContent = 'копировать';
+                    btn.textContent = original;
                     btn.classList.remove('copied');
                 }, 2500);
             }
@@ -560,8 +652,8 @@
         });
     }
 
-    // ===== ФУНКЦИИ ДЛЯ ZIP / MERGE (фоновая задача на сервере + опрос прогресса) =====
-    async function pollJobAndDownload(jobId, downloadName, onProgress) {
+    // ===== ФУНКЦИИ ДЛЯ ZIP / MERGE (фоновая задача + прямая ссылка на результат) =====
+    async function pollJobAndGetLink(jobId, onProgress) {
         while (true) {
             await new Promise(res => setTimeout(res, 2000));
             const statusResp = await fetch(`${API_BASE}/job/${jobId}/status`);
@@ -571,23 +663,21 @@
             if (status.status === 'error') {
                 throw new Error(status.error || 'Ошибка на сервере');
             }
-            onProgress?.(`Скачано ${status.completed}/${status.total} треков...`);
-            if (status.status === 'done') break;
-        }
 
-        onProgress?.('Готово, скачиваем результат...');
-        const fileResp = await fetch(`${API_BASE}/job/${jobId}/download`);
-        if (!fileResp.ok) throw new Error('Не удалось скачать готовый файл');
-        const blob = await fileResp.blob();
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = downloadName;
-        a.click();
-        URL.revokeObjectURL(a.href);
+            // Обновляем кнопки треков в превью по мере готовности —
+            // чтобы при желании скачать один трек не тянуть его заново
+            const doneCount = status.tracks.filter(t => t.done).length;
+            status.tracks.forEach(t => {
+                if (t.done && t.url) setTrackRowLink(t.idx, t.url);
+            });
+            onProgress?.(`Готово ${doneCount}/${status.total} треков...`);
+
+            if (status.status === 'done') return status.result_url;
+        }
     }
 
     async function downloadAsZip(tracks, onProgress) {
-        onProgress?.('Запускаем скачивание на сервере...');
+        onProgress?.('Запускаем на сервере...');
         const resp = await fetch(`${API_BASE}/zip/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -598,11 +688,11 @@
             throw new Error(err.error || 'Ошибка запуска задачи');
         }
         const { job_id } = await resp.json();
-        await pollJobAndDownload(job_id, 'playlist.zip', onProgress);
+        return await pollJobAndGetLink(job_id, onProgress);
     }
 
     async function downloadAndMerge(tracks, onProgress) {
-        onProgress?.('Запускаем скачивание на сервере...');
+        onProgress?.('Запускаем на сервере...');
         const resp = await fetch(`${API_BASE}/merge/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -613,7 +703,7 @@
             throw new Error(err.error || 'Ошибка запуска задачи');
         }
         const { job_id } = await resp.json();
-        await pollJobAndDownload(job_id, 'merged.mp3', onProgress);
+        return await pollJobAndGetLink(job_id, onProgress);
     }
 
     // Возвращает только те треки, у которых чекбокс отмечен
@@ -628,27 +718,24 @@
         return selected;
     }
 
-    // ===== НОВЫЕ ОБРАБОТЧИКИ КНОПОК =====
+    // ===== ОБРАБОТЧИКИ КНОПОК ZIP / MERGE =====
     async function downloadZip() {
         const btn = document.getElementById('zipBtn');
         const selected = getSelectedTracks();
         if (!selected || selected.length === 0) {
-            alert('Нет выбранных треков для скачивания');
+            alert('Нет выбранных треков');
             return;
         }
         btn.disabled = true;
-        btn.textContent = '⏳';
+        const originalText = btn.textContent;
         try {
-            await downloadAsZip(selected, (msg) => {
-                console.log(msg);
-                // Можно обновлять статус на кнопке
-                btn.textContent = msg;
-            });
+            const resultUrl = await downloadAsZip(selected, (msg) => { btn.textContent = msg; });
+            showBatchResultLink(resultUrl, 'ZIP готов');
         } catch (e) {
             alert('Ошибка: ' + e.message);
         } finally {
             btn.disabled = false;
-            btn.textContent = '📦 Скачать ZIP';
+            btn.textContent = originalText;
         }
     }
 
@@ -656,22 +743,32 @@
         const btn = document.getElementById('mergeBtn');
         const selected = getSelectedTracks();
         if (!selected || selected.length === 0) {
-            alert('Нет выбранных треков для объединения');
+            alert('Нет выбранных треков');
             return;
         }
         btn.disabled = true;
-        btn.textContent = '⏳';
+        const originalText = btn.textContent;
         try {
-            await downloadAndMerge(selected, (msg) => {
-                console.log(msg);
-                btn.textContent = msg;
-            });
+            const resultUrl = await downloadAndMerge(selected, (msg) => { btn.textContent = msg; });
+            showBatchResultLink(resultUrl, 'Объединённый файл готов');
         } catch (e) {
             alert('Ошибка: ' + e.message);
         } finally {
             btn.disabled = false;
-            btn.textContent = '🔗 Объединить в один MP3';
+            btn.textContent = originalText;
         }
+    }
+
+    // Показывает готовую ссылку на ZIP/объединённый файл прямо под кнопками
+    function showBatchResultLink(url, label) {
+        let box = document.getElementById('batchResultLink');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'batchResultLink';
+            box.style.marginTop = '10px';
+            document.getElementById('batchButtons').after(box);
+        }
+        renderLinkResult(box, url, `${label}: 🔗 ссылка`);
     }
 </script>
 </body>
