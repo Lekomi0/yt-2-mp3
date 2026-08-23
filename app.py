@@ -154,7 +154,22 @@ def download_via_notube(video_url, output_path):
                 for chunk in file_resp.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
-            logging.info(f"notube ({server}): успешно скачан {os.path.basename(output_path)}")
+
+            # Защита от "пустышек": notube иногда (похоже, после какого-то
+            # количества запросов подряд — троттлинг/капча) отдаёт вместо
+            # реального файла фиксированную заглушку небольшого размера
+            # вместо настоящего mp3. Отбраковываем такие результаты, чтобы
+            # они не попали в кэш как будто это валидный трек.
+            actual_size = os.path.getsize(output_path)
+            if actual_size < MIN_VALID_MP3_SIZE:
+                logging.warning(
+                    f"notube ({server}): подозрительно маленький файл "
+                    f"({actual_size} байт) — похоже на заглушку/троттлинг, отбрасываем"
+                )
+                os.remove(output_path)
+                continue
+
+            logging.info(f"notube ({server}): успешно скачан {os.path.basename(output_path)} ({actual_size} байт)")
             return True
 
         except Exception as e:
@@ -163,21 +178,47 @@ def download_via_notube(video_url, output_path):
 
     return False
 
+# Минимальный правдоподобный размер mp3-трека — всё, что меньше, считаем
+# заглушкой/ошибкой, а не настоящим треком. Даже короткий 15-секундный
+# клип на низком битрейте обычно тяжелее этого порога.
+MIN_VALID_MP3_SIZE = 150 * 1024  # 150 КБ
+
 # ===== КЭШИРУЮЩЕЕ СКАЧИВАНИЕ ПО video_id =====
 # Если трек уже качали (через /convert, /zip или /merge) — переиспользуем
-# файл с диска, не ходим в notube повторно.
+# файл с диска, не ходим в notube повторно. Но сначала проверяем, что
+# закэшированный файл не является той самой заглушкой — иначе он бы
+# навсегда "залипал" как будто это рабочий трек.
+_track_locks = {}
+_track_locks_guard = threading.Lock()
+
+def _get_track_lock(video_id):
+    with _track_locks_guard:
+        if video_id not in _track_locks:
+            _track_locks[video_id] = threading.Lock()
+        return _track_locks[video_id]
+
 def get_or_download_track(video_url):
     video_id = extract_video_id(video_url)
     mp3_path = os.path.join(STORAGE_DIR, f'{video_id}.mp3')
-    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
-        return mp3_path, video_id
 
-    for attempt in range(2):
-        if download_via_notube(video_url, mp3_path):
-            return mp3_path, video_id
-        time.sleep(2)
+    # Лочимся по конкретному video_id — если два запроса одновременно хотят
+    # один и тот же трек, второй дождётся первого и просто возьмёт готовый
+    # файл из кэша, вместо повторного похода в notube.
+    lock = _get_track_lock(video_id)
+    with lock:
+        if os.path.exists(mp3_path):
+            if os.path.getsize(mp3_path) >= MIN_VALID_MP3_SIZE:
+                return mp3_path, video_id
+            else:
+                logging.warning(f"Обнаружен подозрительный кэш-файл {video_id}.mp3, удаляем и качаем заново")
+                os.remove(mp3_path)
 
-    return None, video_id
+        for attempt in range(2):
+            if download_via_notube(video_url, mp3_path):
+                return mp3_path, video_id
+            time.sleep(2)
+
+        return None, video_id
 
 # ===== ЭНДПОИНТ /convert (получить прямую ссылку на один трек) =====
 @app.route('/convert', methods=['GET', 'OPTIONS'])
