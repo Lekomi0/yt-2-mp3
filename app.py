@@ -92,8 +92,18 @@ def extract_video_id(url):
 STORAGE_DIR = '/tmp/converted-files'
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
+# ===== ПУБЛИЧНЫЙ АДРЕС СЕРВИСА =====
+# Используется для формирования ВСЕХ ссылок (/convert, zip/merge). Намеренно
+# не берём request.host_url — если перед сервером стоит Cloudflare Worker
+# (для обхода блокировки домена в РФ), host_url покажет внутренний адрес
+# Render, а не публичный адрес Worker'а, и ссылка окажется недоступна
+# пользователям без VPN. Задайте переменную окружения PUBLIC_BASE_URL на
+# тот адрес, который реально открывается у пользователей (Worker, если он
+# есть, иначе — сам Render).
+PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', 'http://localhost:8080')
+
 def files_url(filename):
-    return request.host_url.rstrip('/') + f"/files/{filename}"
+    return PUBLIC_BASE_URL.rstrip('/') + f"/files/{filename}"
 
 # ===== ПРОВАЙДЕР: notube.net =====
 NOTUBE_SERVERS = ['s43', 's56', 's75']
@@ -362,7 +372,7 @@ def run_zip_job(job_id, tracks):
         def job(idx, track):
             mp3_path, video_id = get_or_download_track(track['url'])
             if mp3_path:
-                mark_track_done(job_id, idx, files_url_static(f'{video_id}.mp3'))
+                mark_track_done(job_id, idx, files_url(f'{video_id}.mp3'))
             return idx, track.get('title', f'track_{idx}'), mp3_path
 
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -387,7 +397,7 @@ def run_zip_job(job_id, tracks):
                 safe_filename = re.sub(r'[\\/*?:"<>|]', '', filename)
                 zipf.write(path, safe_filename)
 
-        update_job(job_id, status='done', result_url=files_url_static(zip_name))
+        update_job(job_id, status='done', result_url=files_url(zip_name))
     except Exception as e:
         logging.error(f"ZIP job error: {str(e)}")
         update_job(job_id, status='error', error=str(e))
@@ -399,7 +409,7 @@ def run_merge_job(job_id, tracks):
         def job(idx, track):
             mp3_path, video_id = get_or_download_track(track['url'])
             if mp3_path:
-                mark_track_done(job_id, idx, files_url_static(f'{video_id}.mp3'))
+                mark_track_done(job_id, idx, files_url(f'{video_id}.mp3'))
             return idx, mp3_path
 
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -433,17 +443,10 @@ def run_merge_job(job_id, tracks):
                 update_job(job_id, status='error', error='FFmpeg merge failed')
                 return
 
-            update_job(job_id, status='done', result_url=files_url_static(merged_name))
+            update_job(job_id, status='done', result_url=files_url(merged_name))
     except Exception as e:
         logging.error(f"Merge job error: {str(e)}")
         update_job(job_id, status='error', error=str(e))
-
-# request.host_url недоступен вне контекста запроса (в фоновом потоке) —
-# поэтому берём базовый адрес один раз из переменной окружения/константы.
-PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', 'https://yt-2-mp3.relaxdev.ru')
-
-def files_url_static(filename):
-    return PUBLIC_BASE_URL.rstrip('/') + f"/files/{filename}"
 
 @app.route('/zip/start', methods=['POST'])
 def zip_start():
